@@ -1,0 +1,18 @@
+﻿# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.build/
+dist/
+.pytest_cache/
+
+# 运行时数据（sqlite / blobs / secret.key）
+data/
+.admintest/
+.smoketest/
+_smoke/
+
+# 部署密钥
+/.env
+/.env.local

@@ -1,0 +1,216 @@
+"""部署形态：默认提取码、挂载前缀、对外域名。
+
+这一组测的是「同一份代码怎么挂到不同 URL 下」，以及默认安全姿态 ——
+它们是部署时最容易出错、也最难在本地发现的部分。
+"""
+
+from __future__ import annotations
+
+import io
+
+import pytest
+
+from bfs.app import create_app
+from bfs.config import Settings
+
+
+def make_settings(tmp_path, **overrides) -> Settings:
+    base = dict(
+        data_dir=tmp_path / "data",
+        rate_limit_per_minute=1000,
+        audit=False,
+    )
+    base.update(overrides)
+    return Settings(**base)
+
+
+# ---------------------------------------------------------------- 默认提取码
+
+
+def test_extract_code_is_generated_by_default(tmp_path):
+    from fastapi.testclient import TestClient
+
+    settings = make_settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        created = client.post("/api/shares", json={"text": "hi"}).json()
+        code = created["extract_code"]
+        assert code and len(code) == 4 and code.isdigit()
+        assert created["has_extract_code"] is True
+
+        # 没码拿不到内容
+        assert client.get(f"/api/shares/{created['id']}/content").status_code == 403
+        # 带码可以
+        assert (
+            client.get(f"/api/shares/{created['id']}/content", params={"code": code}).text
+            == "hi"
+        )
+
+
+def test_default_code_can_be_disabled(tmp_path):
+    from fastapi.testclient import TestClient
+
+    settings = make_settings(tmp_path, auto_extract_code=False)
+    with TestClient(create_app(settings)) as client:
+        created = client.post("/api/shares", json={"text": "hi"}).json()
+        assert created["extract_code"] is None
+        assert created["has_extract_code"] is False
+        assert client.get(f"/api/shares/{created['id']}/content").text == "hi"
+
+
+def test_no_code_flag_wins_over_auto(tmp_path):
+    from fastapi.testclient import TestClient
+
+    settings = make_settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/api/shares", json={"text": "hi", "no_code": True}
+        ).json()
+        assert created["extract_code"] is None
+        assert client.get(f"/api/shares/{created['id']}/content").text == "hi"
+
+
+def test_user_supplied_code_is_kept(tmp_path):
+    from fastapi.testclient import TestClient
+
+    settings = make_settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/api/shares", json={"text": "hi", "extract_code": "8765"}
+        ).json()
+        assert created["extract_code"] == "8765"
+
+
+def test_files_get_auto_code_too(tmp_path):
+    from fastapi.testclient import TestClient
+
+    settings = make_settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/api/shares",
+            files={"file": ("a.bin", io.BytesIO(b"data"), "application/octet-stream")},
+        ).json()
+        assert created["extract_code"] and created["has_extract_code"] is True
+
+
+# ---------------------------------------------------------------- 挂载前缀
+
+
+def test_prefix_moves_everything_under_it(tmp_path):
+    from fastapi.testclient import TestClient
+
+    settings = make_settings(tmp_path, path_prefix="bfs")
+    with TestClient(create_app(settings)) as client:
+        # 页面、静态资源、API、分享页都在 /bfs 下
+        assert client.get("/bfs/").status_code == 200
+        assert client.get("/bfs/static/app.js").status_code == 200
+        assert client.get("/bfs/api/limits").status_code == 200
+
+        created = client.post("/bfs/api/shares", json={"text": "hi", "no_code": True}).json()
+        # 分享链接也用前缀，而不是 /s/；且前缀只出现一次
+        assert created["url"].endswith(f"/bfs/{created['id']}")
+        assert created["url"].count("/bfs") == 1
+        assert client.get(f"/bfs/{created['id']}").status_code == 200
+
+    # 根路径不再提供服务（避免和主站抢路由）
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/api/limits").status_code == 404
+
+
+def test_prefix_share_segment_and_ota(tmp_path):
+    from fastapi.testclient import TestClient
+
+    settings = make_settings(tmp_path, path_prefix="bfs")
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/bfs/api/shares",
+            files={"file": ("fw.bin", io.BytesIO(b"\x00\x01fw"), "application/octet-stream")},
+            data={"no_code": "1"},
+        ).json()
+        assert created["url"].endswith(f"/bfs/{created['id']}")
+
+        ota = client.post(
+            f"/bfs/api/shares/{created['id']}/ota",
+            json={"manage_token": created["manage_token"]},
+        ).json()
+        assert ota["url"].endswith(f"/bfs/ota/{ota['token']}")
+        assert ota["url"].count("/bfs") == 1
+        assert client.get(f"/bfs/ota/{ota['token']}").content == b"\x00\x01fw"
+
+
+def test_explicit_share_segment(tmp_path):
+    from fastapi.testclient import TestClient
+
+    # 想保留 /s/<id> 而不是 /bfs/<id> 时，显式指定 share_segment=s
+    settings = make_settings(tmp_path, path_prefix="bfs", share_segment="s")
+    with TestClient(create_app(settings)) as client:
+        created = client.post("/bfs/api/shares", json={"text": "hi", "no_code": True}).json()
+        assert created["url"].endswith(f"/bfs/s/{created['id']}")
+        assert created["url"].count("/bfs") == 1  # 不能重复拼前缀
+        assert client.get(f"/bfs/s/{created['id']}").status_code == 200
+
+
+def test_page_injects_mount_info(tmp_path):
+    from fastapi.testclient import TestClient
+
+    settings = make_settings(tmp_path, path_prefix="bfs")
+    with TestClient(create_app(settings)) as client:
+        html = client.get("/bfs/").text
+        assert '__BFS_BASE__="/bfs"' in html
+        assert '__BFS_API_PREFIX__="/bfs/api"' in html
+
+
+def test_page_injects_root_mount_info(tmp_path):
+    from fastapi.testclient import TestClient
+
+    settings = make_settings(tmp_path)
+    with TestClient(create_app(settings)) as client:
+        html = client.get("/").text
+        assert '__BFS_BASE__=""' in html
+        assert '__BFS_SHARE_PREFIX__="/s"' in html
+        assert '__BFS_API_PREFIX__="/api"' in html
+
+
+# ---------------------------------------------------------------- 对外域名
+
+
+def test_base_url_overrides_request_origin(tmp_path):
+    from fastapi.testclient import TestClient
+
+    settings = make_settings(tmp_path, base_url="https://view.lotenall.com/bfs", path_prefix="bfs")
+    with TestClient(create_app(settings)) as client:
+        created = client.post("/bfs/api/shares", json={"text": "hi", "no_code": True}).json()
+        assert created["url"] == f"https://view.lotenall.com/bfs/{created['id']}"
+
+
+def test_url_falls_back_to_request_origin(tmp_path):
+    from fastapi.testclient import TestClient
+
+    settings = make_settings(tmp_path)
+    with TestClient(create_app(settings, )) as client:
+        created = client.post("/api/shares", json={"text": "hi", "no_code": True}).json()
+        assert created["url"].startswith("http://testserver/s/")
+
+
+# ---------------------------------------------------------------- 派生属性
+
+
+@pytest.mark.parametrize(
+    "path_prefix,share_segment,expected_prefix,expected_share,expected_api",
+    [
+        ("", "", "", "/s", "/api"),
+        ("bfs", "", "/bfs", "/bfs", "/bfs/api"),
+        ("/bfs/", "", "/bfs", "/bfs", "/bfs/api"),
+        ("bfs", "s", "/bfs", "/bfs/s", "/bfs/api"),
+        ("", "d", "", "/d", "/api"),
+        ("a/b", "", "/a/b", "/a/b", "/a/b/api"),
+    ],
+)
+def test_derived_paths(path_prefix, share_segment, expected_prefix, expected_share, expected_api):
+    settings = Settings(
+        data_dir=__import__("pathlib").Path("."),
+        path_prefix=path_prefix,
+        share_segment=share_segment,
+    )
+    assert settings.prefix == expected_prefix
+    assert settings.share_prefix == expected_share
+    assert settings.api_prefix == expected_api

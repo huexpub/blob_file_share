@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>分享 · BFS</title>
+    <link rel="icon" type="image/svg+xml" href="__BASE__/favicon.svg" />
+    <link rel="stylesheet" href="__BASE__/static/style.css" />
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('bfs.theme');
+          document.documentElement.dataset.theme =
+            saved === 'light' || saved === 'dark' ? saved : 'dark';
+        } catch (e) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div class="shell shell--viewer">
+      <header class="topbar"></header>
+
+      <main class="main main--viewer" id="main">
+        <div id="loading" style="display: grid; gap: 12px">
+          <div class="card"><div class="card-body" style="height: 84px"></div></div>
+        </div>
+
+        <div id="dead" class="hidden">
+          <div class="viewer-dead">
+            <span id="deadIcon" class="viewer-dead-icon"></span>
+            <h1 id="deadTitle">内容已焚毁</h1>
+            <p id="deadText">内容已从服务器删除，无法恢复。</p>
+          </div>
+        </div>
+
+        <div id="content" class="hidden">
+          <div class="viewer-shell">
+            <div class="viewer" id="viewer"></div>
+            <!-- 操作栏在内容卡片**外面**的右侧一列，sticky 跟随滚动：
+                 内容多长都停在起始位置那一行，但不会盖住正文。 -->
+            <aside class="viewer-rail" id="viewerFoot"></aside>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <div class="modal-mask modal-mask--blur hidden" id="gateMask">
+      <div class="modal modal--gate" role="dialog" aria-modal="true" aria-labelledby="gateTitle">
+        <div class="gate-body">
+          <span class="gate-icon" id="gateIcon"></span>
+          <h1 id="gateTitle">需要提取码</h1>
+
+          <div class="code-boxes" id="codeBoxes">
+            <input class="code-box" inputmode="numeric" maxlength="1" autocomplete="off" aria-label="第 1 位" />
+            <input class="code-box" inputmode="numeric" maxlength="1" autocomplete="off" aria-label="第 2 位" />
+            <input class="code-box" inputmode="numeric" maxlength="1" autocomplete="off" aria-label="第 3 位" />
+            <input class="code-box" inputmode="numeric" maxlength="1" autocomplete="off" aria-label="第 4 位" />
+          </div>
+
+          <div class="banner banner--danger hidden" id="codeError"></div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="__BASE__/static/share.js"></script>
+      <footer class="foot">
+        <span>BLOB FILE SHARING @ 2026</span>
+      </footer>
+  </body>
+</html>

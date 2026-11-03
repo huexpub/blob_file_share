@@ -1,0 +1,43 @@
+﻿services:
+  bfs:
+    # 直接用 GitHub 上构建好的镜像；本地要改代码时 `docker compose build` 会覆盖同名 tag
+    image: ghcr.io/huexpub/blob_file_share:latest
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      BFS_HOST: 0.0.0.0
+      BFS_PORT: 8000
+      BFS_DATA_DIR: /app/data
+      # 反代场景填对外域名，复制出去的链接才是对的
+      BFS_BASE_URL: ${BFS_BASE_URL:-}
+      # 挂载前缀：留空 = 根；填 bfs = 整个服务住进 /bfs（页面/API/链接都在里面）
+      BFS_PATH_PREFIX: ${BFS_PATH_PREFIX:-}
+      # 分享段：留空 = 跟前缀走（/bfs/<id>）；填 s 则用 /bfs/s/<id>
+      BFS_SHARE_SEGMENT: ${BFS_SHARE_SEGMENT:-}
+      # 上限与默认值都可以用 .env 覆盖
+      BFS_MAX_FILE_MB: ${BFS_MAX_FILE_MB:-100}
+      BFS_MAX_TEXT_KB: ${BFS_MAX_TEXT_KB:-2048}
+      BFS_DEFAULT_TTL_HOURS: ${BFS_DEFAULT_TTL_HOURS:-24}
+      BFS_MAX_TTL_HOURS: ${BFS_MAX_TTL_HOURS:-720}
+      BFS_DEFAULT_MAX_READS: ${BFS_DEFAULT_MAX_READS:-1}
+      BFS_RATE_LIMIT_PER_MINUTE: ${BFS_RATE_LIMIT_PER_MINUTE:-30}
+      BFS_TOMBSTONE_HOURS: ${BFS_TOMBSTONE_HOURS:-168}
+      BFS_PURGE_INTERVAL_SECONDS: ${BFS_PURGE_INTERVAL_SECONDS:-600}
+    volumes:
+      - bfs-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      # 探活在 API 前缀下：/healthz 不存在，默认是 /api/healthz；挂了前缀则是 /bfs/api/healthz
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,urllib.request;b='http://127.0.0.1:8000';p=os.environ.get('BFS_PATH_PREFIX','').strip('/');urllib.request.urlopen(b+('/'+p if p else '')+'/api/healthz')"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  bfs-data:
