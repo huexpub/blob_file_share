@@ -76,6 +76,19 @@ class Settings:
     #: 是否记录审计事件
     audit: bool = True
 
+    # ---- 管理员闸门 ----
+    #: 管理员密码。设了才开启登录（写入口需要登录，读入口始终公开）。
+    admin_password: str = ""
+    #: 可选的用户名，设了就要求「用户名 + 密码」两项
+    admin_user: str = ""
+    #: 登录态有效期（小时）
+    session_ttl_hours: int = 24 * 7
+    #: GitHub OAuth App
+    github_client_id: str = ""
+    github_client_secret: str = ""
+    #: 允许登录的 GitHub 用户名（逗号分隔）。空 = 即便配了 OAuth 也不放人进。
+    github_allowed_users: str = ""
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "bfs.sqlite3"
@@ -121,6 +134,12 @@ class Settings:
             auto_extract_code=(_env("AUTO_EXTRACT_CODE") or "1").lower()
             not in {"0", "false", "off"},
             audit=(_env("AUDIT") or "1").lower() not in {"0", "false", "off"},
+            admin_password=_env("ADMIN_PASSWORD") or "",
+            admin_user=_env("ADMIN_USER") or "",
+            session_ttl_hours=_int("SESSION_TTL_HOURS", 24 * 7),
+            github_client_id=_env("GITHUB_CLIENT_ID") or "",
+            github_client_secret=_env("GITHUB_CLIENT_SECRET") or "",
+            github_allowed_users=_env("GITHUB_ALLOWED_USERS") or "",
         )
 
     def public_url(self, base: str, share_id: str) -> str:
@@ -132,7 +151,11 @@ class Settings:
         去重规则：``base_url`` 里已经写了挂载前缀（`https://x.com/bfs`）就不再拼一次。
         否则两边都带前缀会得到 `/bfs/bfs/<id>` —— 这类重复拼接很难一眼看出来。
         """
-        return f"{self._root(base)}{self.share_path(share_id)}"
+        return self.external_url(base, self.share_path(share_id))
+
+    def external_url(self, base: str, path: str) -> str:
+        """``origin + 完整路径``，用于 OAuth 回跳这类必须是绝对地址的场景。"""
+        return f"{self._root(base)}{path}"
 
     def _root(self, base: str) -> str:
         root = (self.base_url or base).rstrip("/")
@@ -169,3 +192,37 @@ class Settings:
     def api_prefix(self) -> str:
         """API 前缀：带挂载前缀时用 `/bfs/api`，否则 `/api`。"""
         return f"{self.prefix}/api"
+
+    # ---------------------------------------------------------------- 闸门
+
+    @property
+    def github_ready(self) -> bool:
+        """OAuth 三要素齐了才算可用 —— 少一个就当作没配，别让人卡在 GitHub 错误页。"""
+        return bool(
+            self.github_client_id
+            and self.github_client_secret
+            and self.github_allowed_users.strip()
+        )
+
+    @property
+    def gate_enabled(self) -> bool:
+        """有任意一种登录方式就开闸门；都没配就保持公开（本地开发不会被挡住）。"""
+        return bool(self.admin_password) or self.github_ready
+
+    @property
+    def github_allowed_set(self) -> set[str]:
+        return {
+            part.strip().lower()
+            for part in self.github_allowed_users.replace(";", ",").split(",")
+            if part.strip()
+        }
+
+    @property
+    def login_path(self) -> str:
+        """登录页（在页面前缀下）：`/bfs/login` 或 `/login`。"""
+        return f"{self.prefix}/login"
+
+    @property
+    def oauth_callback_path(self) -> str:
+        """OAuth 回跳：必须和 GitHub OAuth App 里填的 Callback URL 的路径一致。"""
+        return f"{self.api_prefix}/auth/github/callback"

@@ -11,6 +11,14 @@
       BFS_DATA_DIR: /app/data
       # 反代场景填对外域名，复制出去的链接才是对的
       BFS_BASE_URL: ${BFS_BASE_URL:-}
+      # 管理员闸门：设了才需要登录（只锁写入口，接收方永远公开）。
+      # 留空 = 谁都能建分享（仅适合本地/内网）。详见 README。
+      BFS_ADMIN_PASSWORD: ${BFS_ADMIN_PASSWORD:-}
+      BFS_ADMIN_USER: ${BFS_ADMIN_USER:-}
+      # GitHub 登录：三个都填才生效，用户名白名单逗号分隔
+      BFS_GITHUB_CLIENT_ID: ${BFS_GITHUB_CLIENT_ID:-}
+      BFS_GITHUB_CLIENT_SECRET: ${BFS_GITHUB_CLIENT_SECRET:-}
+      BFS_GITHUB_ALLOWED_USERS: ${BFS_GITHUB_ALLOWED_USERS:-}
       # 挂载前缀：留空 = 根；填 bfs = 整个服务住进 /bfs（页面/API/链接都在里面）
       BFS_PATH_PREFIX: ${BFS_PATH_PREFIX:-}
       # 分享段：留空 = 跟前缀走（/bfs/<id>）；填 s 则用 /bfs/s/<id>

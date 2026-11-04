@@ -64,11 +64,15 @@ def _page(name: str, settings) -> HTMLResponse:
         "base": base,
         "sharePrefix": settings.share_prefix,
         "apiPrefix": settings.api_prefix,
+        "loginPath": settings.login_path,
+        "gate": settings.gate_enabled,
     }
     inject = (
         f"<script>window.__BFS_BASE__={json.dumps(boot['base'])};"
         f"window.__BFS_SHARE_PREFIX__={json.dumps(boot['sharePrefix'])};"
-        f"window.__BFS_API_PREFIX__={json.dumps(boot['apiPrefix'])};</script>"
+        f"window.__BFS_API_PREFIX__={json.dumps(boot['apiPrefix'])};"
+        f"window.__BFS_LOGIN_PATH__={json.dumps(boot['loginPath'])};"
+        f"window.__BFS_GATE__={json.dumps(boot['gate'])};</script>"
     )
     html = html.replace("__BASE__", base)
     # 注入必须在加载 app.js 之前：app.js 里算 API 地址时就用了
@@ -93,6 +97,10 @@ def build_web_router(settings) -> APIRouter:
     @router.get(f"{prefix}/" if prefix else "/", include_in_schema=False)
     def index() -> HTMLResponse:
         return _page("index.html", settings)
+
+    @router.get(settings.login_path, include_in_schema=False)
+    def login() -> HTMLResponse:
+        return _page("login.html", settings)
 
     @router.get(f"{share_prefix}/{{share_id}}", include_in_schema=False)
     def share_page(share_id: str) -> HTMLResponse:

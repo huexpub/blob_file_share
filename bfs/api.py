@@ -21,16 +21,23 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.datastructures import UploadFile
 
-from . import security
+from . import auth, security
 from .analyze import KIND_BINARY, KIND_IMAGE, KIND_LABELS, analyze, normalize, render_html
 from .config import Settings
 from .ratelimit import SlidingWindow
@@ -55,6 +62,13 @@ class CreateTextBody(BaseModel):
 
 class UnlockBody(BaseModel):
     code: str = ""
+
+
+class LoginBody(BaseModel):
+    """密码登录。``username`` 只在配了 ``BFS_ADMIN_USER`` 时才参与校验。"""
+
+    username: str = ""
+    password: str = Field(max_length=512)
 
 
 class BurnBody(BaseModel):
@@ -159,6 +173,145 @@ def _unlocked(request: Request, share_id: str) -> bool:
     return security.verify_ticket(_secret(request), share_id, ticket)
 
 
+# ---------------------------------------------------------------- 管理员闸门
+#
+# 只锁**写入口**：建分享、查历史、焚毁、OTA。
+# 接收方（unlock / claim / commit / render / download / ota 拉取）永远公开 ——
+# 对方手里有链接和提取码就该能看，让他注册账号是把产品做坏了。
+#
+# `/inspect` 也保持公开：它不落库、不写盘，而分享页渲染 .md/.log 正文时要靠它。
+# 靠限速兜住「被当成免费 markdown 渲染器」的情况即可。
+
+
+def _session(request: Request) -> str | None:
+    raw = request.cookies.get(auth.SESSION_COOKIE)
+    return auth.session_subject(_secret(request), raw)
+
+
+def require_admin(request: Request) -> str:
+    """写入口的依赖。未配置闸门时直接放行（本地开发不受影响）。"""
+    settings = get_settings(request)
+    if not settings.gate_enabled:
+        return "anonymous"
+    subject = _session(request)
+    if not subject:
+        raise ShareError("unauthorized", "需要先登录", 401)
+    return subject
+
+
+def _set_session(response: Response, request: Request, subject: str) -> None:
+    settings = get_settings(request)
+    ttl = settings.session_ttl_hours * 3600
+    response.set_cookie(
+        auth.SESSION_COOKIE,
+        auth.issue_session(_secret(request), subject, ttl),
+        max_age=ttl,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+        path="/",
+    )
+
+
+@router.get("/auth/session")
+def auth_session(request: Request) -> dict[str, Any]:
+    """前端启动时问一次：要不要显示登录、当前是谁。"""
+    settings = get_settings(request)
+    return {
+        "gate": settings.gate_enabled,
+        "authenticated": bool(_session(request)) or not settings.gate_enabled,
+        "subject": _session(request),
+        "username_required": bool(settings.admin_user),
+        "methods": {
+            "password": bool(settings.admin_password),
+            "github": settings.github_ready,
+        },
+        "login_path": settings.login_path,
+    }
+
+
+@router.post("/auth/login")
+def auth_login(body: LoginBody, request: Request) -> JSONResponse:
+    settings = get_settings(request)
+    if not settings.gate_enabled:
+        raise ShareError("gate_disabled", "服务未开启登录", 400)
+    if not settings.admin_password:
+        raise ShareError("password_disabled", "未配置密码登录，请用 GitHub 登录", 400)
+
+    # 每 IP 每分钟 10 次：环境变量里的密码通常不短，但也不该给无限次尝试
+    _check_rate(request, "login", 10)
+    if not auth.check_password(settings, body.username, body.password):
+        raise ShareError("bad_credentials", "用户名或密码不正确", 401)
+
+    subject = auth.password_subject(settings)
+    response = JSONResponse({"ok": True, "subject": subject})
+    _set_session(response, request, subject)
+    return response
+
+
+@router.post("/auth/logout")
+def auth_logout(request: Request) -> JSONResponse:
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(auth.SESSION_COOKIE, path="/")
+    return response
+
+
+@router.get("/auth/github/start")
+def auth_github_start(request: Request) -> Response:
+    settings = get_settings(request)
+    if not settings.github_ready:
+        raise ShareError("github_disabled", "未配置 GitHub 登录", 400)
+    state = auth.new_state(_secret(request))
+    redirect_uri = settings.external_url(base_url(request), settings.oauth_callback_path)
+    response = RedirectResponse(
+        auth.authorize_url(settings, redirect_uri, state), status_code=302
+    )
+    response.set_cookie(
+        auth.STATE_COOKIE,
+        state,
+        max_age=600,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+        path="/",
+    )
+    return response
+
+
+@router.get("/auth/github/callback")
+async def auth_github_callback(
+    request: Request, code: str = "", state: str = "", error: str = ""
+) -> Response:
+    """GitHub 回跳。
+
+    任何一步失败都回登录页并带上 ``?error=``，不在这里抛 4xx ——
+    用户看到的是一个页面，而不是一段 JSON。
+    """
+    settings = get_settings(request)
+    login_url = settings.login_path
+
+    if error:
+        return RedirectResponse(f"{login_url}?error=denied", status_code=302)
+    if not auth.verify_state(_secret(request), state) or state != request.cookies.get(
+        auth.STATE_COOKIE
+    ):
+        return RedirectResponse(f"{login_url}?error=state", status_code=302)
+
+    redirect_uri = settings.external_url(base_url(request), settings.oauth_callback_path)
+    try:
+        login = await asyncio.to_thread(auth.exchange_code, settings, code, redirect_uri)
+    except auth.OAuthError:
+        return RedirectResponse(f"{login_url}?error=oauth", status_code=302)
+
+    if not auth.authorized_github_user(settings, login):
+        return RedirectResponse(f"{login_url}?error=not_allowed", status_code=302)
+
+    response = RedirectResponse(f"{settings.prefix}/" if settings.prefix else "/", status_code=302)
+    _set_session(response, request, f"github:{login}")
+    response.delete_cookie(auth.STATE_COOKIE, path="/")
+    return response
+
+
 # ---------------------------------------------------------------- 路由
 #
 # 这里的路径都是**相对段**（`/shares`、`/ota/{token}`），不带 `/api`。
@@ -245,7 +398,7 @@ def inspect(body: InspectBody) -> dict[str, Any]:
 
 
 @router.post("/shares")
-async def create_share(request: Request) -> JSONResponse:
+async def create_share(request: Request, _admin: str = Depends(require_admin)) -> JSONResponse:
     """建分享。Content-Type 是 multipart 就收文件，否则按 JSON 收文本。"""
     _check_rate(request, "create")
     service = get_service(request)
@@ -306,7 +459,9 @@ def share_meta(share_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.post("/shares/status")
-def shares_status(body: StatusBody, request: Request) -> dict[str, Any]:
+def shares_status(
+    body: StatusBody, request: Request, _admin: str = Depends(require_admin)
+) -> dict[str, Any]:
     """批量查状态（不消耗次数）。
 
     发送端历史用它把「待读取」刷成「已读」。只回状态字段，不回正文 ——
@@ -524,14 +679,21 @@ def share_download(
 
 
 @router.post("/shares/{share_id}/burn")
-def burn(share_id: str, body: BurnBody, request: Request) -> dict[str, Any]:
+def burn(
+    share_id: str, body: BurnBody, request: Request, _admin: str = Depends(require_admin)
+) -> dict[str, Any]:
     service = get_service(request)
     share = service.burn(share_id, body.manage_token, ip=client_ip(request))
     return share
 
 
 @router.get("/shares/{share_id}/manage")
-def manage(share_id: str, manage_token: str, request: Request) -> dict[str, Any]:
+def manage(
+    share_id: str,
+    manage_token: str,
+    request: Request,
+    _admin: str = Depends(require_admin),
+) -> dict[str, Any]:
     service = get_service(request)
     data = service.stats(share_id, manage_token)
     data["share"]["url"] = get_settings(request).public_url(
@@ -541,7 +703,9 @@ def manage(share_id: str, manage_token: str, request: Request) -> dict[str, Any]
 
 
 @router.post("/shares/{share_id}/ota")
-def create_ota(share_id: str, body: OtaBody, request: Request) -> dict[str, Any]:
+def create_ota(
+    share_id: str, body: OtaBody, request: Request, _admin: str = Depends(require_admin)
+) -> dict[str, Any]:
     _check_rate(request, "ota")
     service = get_service(request)
     return service.create_ota(

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>登录 · BFS</title>
+    <link rel="icon" type="image/svg+xml" href="__BASE__/favicon.svg" />
+    <link rel="stylesheet" href="__BASE__/static/style.css" />
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('bfs.theme');
+          document.documentElement.dataset.theme =
+            saved === 'light' || saved === 'dark' ? saved : 'dark';
+        } catch (e) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar"></header>
+
+      <main class="main">
+        <form class="card auth-card" id="loginForm" autocomplete="on">
+          <div class="auth-head">
+            <span class="auth-icon" id="authIcon"></span>
+            <h1>登录后即可分享</h1>
+            <p class="muted-2">接收方不需要登录，拿着链接和提取码就能看。</p>
+          </div>
+
+          <div class="card-body auth-body">
+            <label class="field hidden" id="userField">
+              <span>用户名</span>
+              <input class="input" id="username" autocomplete="username" />
+            </label>
+
+            <label class="field hidden" id="passwordField">
+              <span>密码</span>
+              <input
+                class="input"
+                id="password"
+                type="password"
+                autocomplete="current-password"
+                required
+              />
+            </label>
+
+            <div class="banner banner--danger hidden" id="loginError"></div>
+
+            <button class="btn btn--primary btn--lg" id="submitBtn" type="submit">
+              登录
+            </button>
+
+            <div class="auth-divider hidden" id="divider"><span>或</span></div>
+
+            <a class="btn btn--ghost btn--lg hidden" id="githubBtn" href="#">
+              <span class="icon-wrap" data-icon="github"></span>用 GitHub 登录
+            </a>
+          </div>
+        </form>
+      </main>
+
+      <footer class="foot">
+        <span>BLOB FILE SHARING @ 2026</span>
+      </footer>
+    </div>
+
+    <script type="module" src="__BASE__/static/login.js"></script>
+  </body>
+</html>

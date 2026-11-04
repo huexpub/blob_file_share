@@ -37,7 +37,6 @@
                 <textarea
                   class="capture-input"
                   id="pasteArea"
-                  placeholder="在这里按 Ctrl+V 粘贴，或者把文件拖进来 / 点击选择…"
                   spellcheck="false"
                 ></textarea>
 
@@ -51,8 +50,9 @@
                   <div class="capture-hints">
                     <span>代码 / 日志 / 表格 / diff / 堆栈</span>
                     <span>截图与图片</span>
-                    <span>任意文件</span>
+                    <span>文件拖进来或点「选择文件」</span>
                   </div>
+                  <div class="capture-limits" id="captureLimits"></div>
                 </div>
 
                 <input type="file" id="fileInput" multiple hidden />

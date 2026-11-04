@@ -89,6 +89,46 @@ location /bfs/ {
 }
 ```
 
+## 登录（部署到公网时必看）
+
+把服务放到公网后，**建分享的口子不能开着**，否则任何人都能往你的机器上写文件。
+配置任意一种登录方式即自动开启闸门：
+
+```bash
+# 方式一：一个密码。够用、零依赖，推荐。
+BFS_ADMIN_PASSWORD=换成你自己的
+
+# 方式二：GitHub 登录（三项都要填，少一项不生效）
+BFS_GITHUB_CLIENT_ID=xxx
+BFS_GITHUB_CLIENT_SECRET=xxx
+BFS_GITHUB_ALLOWED_USERS=huexpub      # 只有这个账号能登录
+
+# 两种都配也可以，登录页会同时给出两个入口
+```
+
+配置 GitHub 时，OAuth App 的 **Authorization callback URL** 要填：
+
+```
+https://<你的域名>/bfs/api/auth/github/callback     # 挂了前缀 BFS_PATH_PREFIX=bfs
+https://<你的域名>/api/auth/github/callback         # 根部署
+```
+
+要让 OAuth 走对外域名而不是内网地址，同时设好 `BFS_BASE_URL`。
+
+**闸门只锁写入口** —— 建分享、查历史、焚毁、OTA 直链需要登录；
+接收方打开链接、输提取码、看内容、下载 **始终不需要账号**。
+`/api/inspect`（粘贴预览）也保持公开，分享页渲染 `.md`/`.log` 正文要靠它。
+
+不配任何登录方式 = 保持原来的全公开模式，适合本机或纯内网。
+
+| 变量 | 说明 |
+| --- | --- |
+| `BFS_ADMIN_PASSWORD` | 管理员密码，设了就开闸门 |
+| `BFS_ADMIN_USER` | 可选用户名，设了要「用户名 + 密码」两项 |
+| `BFS_SESSION_TTL_HOURS` | 登录态有效期，默认 168（7 天） |
+| `BFS_GITHUB_CLIENT_ID` / `_SECRET` | OAuth App 的凭据 |
+| `BFS_GITHUB_ALLOWED_USERS` | 允许登录的 GitHub 用户名，逗号分隔 |
+
 ## 常用命令
 
 ```bash
@@ -97,7 +137,6 @@ python -m bfs purge          # 清理过期与已焚毁的记录
 python -m bfs info           # 数据目录与统计
 python -m pytest -q          # 测试
 ```
-
 ## 技术栈
 
 Python 3.10+ / FastAPI / SQLite（WAL）。

@@ -16,6 +16,8 @@
 
 import {
   api,
+  authSession,
+  BOOT,
   copyText,
   escapeHtml,
   formatBytes,
@@ -25,12 +27,20 @@ import {
   initTheme,
   isHexLike,
   mountTopbar,
+  redirectToLogin,
   toast,
   uploadWithProgress
 } from './app.js';
 
 initTheme();
 mountTopbar({ subtitle: '快传', history: true });
+
+// 开了闸门但没登录：直接带去登录页，别让用户先看到上传界面再被 401 打回来
+if (BOOT.gate) {
+  authSession().then((info) => {
+    if (!info.authenticated) redirectToLogin();
+  });
+}
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -251,7 +261,8 @@ async function refreshStatuses() {
   try {
     const data = await api('/api/shares/status', {
       method: 'POST',
-      body: JSON.stringify({ ids })
+      body: JSON.stringify({ ids }),
+      noRedirect: true
     });
     patchHistory(data.items || []);
   } catch {
@@ -416,9 +427,11 @@ function syncEmptyState() {
 api('/api/limits')
   .then((limits) => {
     if (!limits) return;
-    pasteArea.placeholder =
-      `在这里按 Ctrl+V 粘贴（单次 ≤ ${Math.floor(limits.max_text_bytes / 1024)} KB，` +
-      `文件 ≤ ${Math.floor(limits.max_file_bytes / (1024 * 1024))} MB）`;
+    // 上限写在空状态浮层里，不再动 placeholder：
+    // placeholder 与浮层是同一块区域，窗口一矮就会互相压住。
+    $('#captureLimits').textContent =
+      `单次 ≤ ${Math.floor(limits.max_text_bytes / 1024)} KB · ` +
+      `文件 ≤ ${Math.floor(limits.max_file_bytes / (1024 * 1024))} MB`;
   })
   .catch(() => null);
 

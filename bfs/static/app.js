@@ -18,7 +18,9 @@
 const BOOT = {
   base: window.__BFS_BASE__ ?? '',
   sharePrefix: window.__BFS_SHARE_PREFIX__ ?? '/s',
-  apiPrefix: window.__BFS_API_PREFIX__ ?? '/api'
+  apiPrefix: window.__BFS_API_PREFIX__ ?? '/api',
+  loginPath: window.__BFS_LOGIN_PATH__ ?? '/login',
+  gate: window.__BFS_GATE__ === true
 };
 
 /** 站内绝对路径（带挂载前缀）。 */
@@ -99,7 +101,11 @@ const ICONS = {
   close:
     '<path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
   lock:
-    '<rect x="4.5" y="10.5" width="15" height="10" rx="1" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/>'
+    '<rect x="4.5" y="10.5" width="15" height="10" rx="1" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/>',
+  logout:
+    '<path d="M15 17v1a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M11 12h9m0 0-3-3m3 3-3 3" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+  github:
+    '<path d="M12 2.2a9.8 9.8 0 0 0-3.1 19.1c.5.1.7-.2.7-.5v-1.7c-2.7.6-3.3-1.3-3.3-1.3-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.5 2.3 1.1 2.9.8.1-.6.4-1.1.7-1.3-2.2-.2-4.5-1.1-4.5-4.9 0-1.1.4-2 1-2.7-.1-.2-.4-1.2.1-2.5 0 0 .8-.3 2.7 1a9.3 9.3 0 0 1 4.9 0c1.9-1.3 2.7-1 2.7-1 .5 1.3.2 2.3.1 2.5.6.7 1 1.6 1 2.7 0 3.8-2.3 4.7-4.5 4.9.4.3.7.9.7 1.9v2.8c0 .3.2.6.7.5A9.8 9.8 0 0 0 12 2.2Z" fill="currentColor"/>'
 };
 
 export function icon(name, cls = 'icon') {
@@ -161,7 +167,7 @@ export function resolveUrl(path) {
   return path;
 }
 
-export async function api(path, options = {}) {
+export async function api(path, { noRedirect = false, ...options } = {}) {
   const res = await fetch(resolveUrl(path), {
     credentials: 'same-origin',
     headers:
@@ -170,10 +176,41 @@ export async function api(path, options = {}) {
         : undefined,
     ...options
   });
-  if (!res.ok) throw await parseError(res);
+  if (!res.ok) {
+    const error = await parseError(res);
+    // 登录态过期：直接把整页带去登录，别让用户对着一个红色 toast 猜
+    if (error.status === 401 && !noRedirect) redirectToLogin();
+    throw error;
+  }
   const type = res.headers.get('content-type') || '';
   if (type.includes('application/json')) return res.json();
   return res.text();
+}
+
+/** 跳到登录页，并带上回跳地址。 */
+export function redirectToLogin() {
+  const next = location.pathname + location.search;
+  location.replace(`${BOOT.loginPath}?next=${encodeURIComponent(next)}`);
+}
+
+/** 问一次登录状态：页面决定要不要显示「退出」、要不要等人登录。 */
+export async function authSession() {
+  if (!BOOT.gate) return { gate: false, authenticated: true };
+  try {
+    return await api('/api/auth/session', { noRedirect: true });
+  } catch {
+    return { gate: true, authenticated: false, methods: {} };
+  }
+}
+
+/** 退出登录。 */
+export async function logout() {
+  try {
+    await api('/api/auth/logout', { method: 'POST', noRedirect: true });
+  } catch {
+    /* 反正都要回登录页 */
+  }
+  location.replace(BOOT.loginPath);
 }
 
 /** 带上传进度的 POST（fetch 本身没有进度事件，用 XHR）。 */
@@ -195,6 +232,8 @@ export function uploadWithProgress(path, formData, onProgress) {
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(body);
       } else {
+        // 上传走到这里说明登录态过期了：跳登录比报「上传失败」有用
+        if (xhr.status === 401) redirectToLogin();
         reject(
           new ApiError(
             body?.error || `http_${xhr.status}`,
@@ -425,6 +464,11 @@ export function mountTopbar({ subtitle, backHref, home = true, history = false, 
     });
     return;
   }
+  const logoutSlot = home
+    ? `<button class="btn btn--ghost btn--sm btn--icon hidden" id="logoutBtn" title="退出登录">
+         ${icon('logout')}
+       </button>`
+    : '';
   bar.innerHTML = `
     ${
       backHref
@@ -450,12 +494,23 @@ export function mountTopbar({ subtitle, backHref, home = true, history = false, 
       <button class="btn btn--ghost btn--sm btn--icon" id="themeToggle" title="切换配色">
         ${icon(themeName === 'dark' ? 'sun' : 'moon')}
       </button>
+      ${logoutSlot}
     </div>
   `;
   bar.querySelector('#themeToggle').addEventListener('click', (event) => {
     const next = toggleTheme();
     event.currentTarget.innerHTML = icon(next === 'dark' ? 'sun' : 'moon');
   });
+
+  // 只有开启闸门且确实登录过才给「退出」；公开模式（没配密码）没有退出的概念
+  const logoutBtn = bar.querySelector('#logoutBtn');
+  if (logoutBtn) {
+    authSession().then((info) => {
+      if (!info.gate || !info.authenticated) return;
+      logoutBtn.classList.remove('hidden');
+      logoutBtn.addEventListener('click', () => logout());
+    });
+  }
 }
 
 export function escapeHtml(value) {
