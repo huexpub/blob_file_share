@@ -143,17 +143,19 @@ def test_batch_upload_attributes_content_to_token_owner(tmp_path):
         assert response.status_code == 201
         payload = response.json()
         assert payload["owner"] == "gitea:alice"
-        assert len(payload["items"]) == 2
-        assert "我分享给你 2 个文件" in payload["message"]
+        # 一次上传 = 一条分享：两个文件共享同一个链接和提取码
+        share = payload["share"]
+        assert share["file_count"] == 2
+        assert [f["file_name"] for f in share["files"]] == ["firmware.bin", "symbols.zip"]
+        assert "2 个文件" in payload["message"]
+        assert share["url"] in payload["message"]
         # 默认永久 + 不限次数：构建产物是给人长期下载的
-        assert all(item["expires_at"] is None for item in payload["items"])
-        assert all(item["max_reads"] == -1 for item in payload["items"])
+        assert share["expires_at"] is None
+        assert share["max_reads"] == -1
 
         history = client.get("/api/shares/mine").json()
         assert history["owner"] == "gitea:alice"
-        assert {item["id"] for item in history["items"]} == {
-            item["id"] for item in payload["items"]
-        }
+        assert [item["id"] for item in history["items"]] == [share["id"]]
 
 
 def test_batch_upload_with_unknown_token_is_401(tmp_path):

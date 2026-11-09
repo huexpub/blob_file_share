@@ -139,17 +139,26 @@ class Service:
         return path
 
     def _burn(self, conn, row, reason: str, ip: str | None = None) -> None:
-        """幂等焚毁：删文件、清正文、打墓碑。"""
+        """幂等焚毁：删所有文件、清正文、打墓碑。"""
         if row["burned_at"] is not None:
             return
+        # 一次分享可能有多个文件：全部删掉，一个都不留
+        for blob in conn.execute(
+            "SELECT blob FROM share_files WHERE share_id = ?", (row["id"],)
+        ).fetchall():
+            try:
+                self._blob_path(blob["blob"]).unlink(missing_ok=True)
+            except OSError:
+                pass
         if row["blob"]:
             try:
                 self._blob_path(row["blob"]).unlink(missing_ok=True)
             except OSError:
                 pass
+        conn.execute("DELETE FROM share_files WHERE share_id = ?", (row["id"],))
         conn.execute(
             "UPDATE shares SET text_content = NULL, blob = NULL, burned_at = ?,"
-            " claim_token = NULL, claim_expires_at = NULL WHERE id = ?",
+            " claim_token = NULL, claim_expires_at = NULL, file_count = 0 WHERE id = ?",
             (_now(), row["id"]),
         )
         conn.execute("DELETE FROM ota_tokens WHERE share_id = ?", (row["id"],))
@@ -172,7 +181,7 @@ class Service:
             return "exhausted"
         return "active"
 
-    def _view(self, row, base_url: str = "") -> dict[str, Any]:
+    def _view(self, row, base_url: str = "", files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         state = self._state(row)
         kind = row["detected_kind"] or ("text" if row["kind"] == "text" else "binary")
         language = row["language"]
@@ -193,6 +202,9 @@ class Service:
             "state": state,
             "has_extract_code": row["extract_hash"] is not None,
             "markdown": bool(row["markdown"]),
+            # 有文件时为文件元信息列表（不含 blob 路径）；纯文本分享是空数组
+            "file_count": row["file_count"],
+            "files": files or [],
             "detected": {
                 "kind": kind,
                 "kind_label": KIND_LABELS.get(kind, kind),
@@ -201,6 +213,33 @@ class Service:
             "url": self.settings.public_url(base_url, row["id"]) if base_url else "",
         }
         return view
+
+    def _files_of(self, conn, share_id: str) -> list[dict[str, Any]]:
+        """一次分享里的文件清单（脱敏：不含 blob 路径）。"""
+        rows = conn.execute(
+            "SELECT idx, file_name, content_type, size, sha256, md5, crc32,"
+            " detected_kind, language FROM share_files WHERE share_id = ? ORDER BY idx",
+            (share_id,),
+        ).fetchall()
+        return [
+            {
+                "idx": row["idx"],
+                "file_name": row["file_name"],
+                "content_type": row["content_type"],
+                "size": row["size"],
+                "sha256": row["sha256"],
+                "md5": row["md5"],
+                "crc32": row["crc32"],
+                "detected": {
+                    "kind": row["detected_kind"] or "binary",
+                    "kind_label": KIND_LABELS.get(
+                        row["detected_kind"] or "binary", row["detected_kind"] or "binary"
+                    ),
+                    "language": row["language"],
+                },
+            }
+            for row in rows
+        ]
 
     def _get_row(self, conn, share_id: str):
         row = conn.execute("SELECT * FROM shares WHERE id = ?", (share_id,)).fetchone()
@@ -216,168 +255,134 @@ class Service:
         return False
 
     # ---------------------------------------------------------------- 创建
+    #
+    # 一次「发布」= 一条分享。用户可能同时粘一段代码 + 拖两个文件，
+    # 这在语义上是同一件事：同一个链接、同一个提取码、同一次焚毁。
+    # 所以对外只暴露 create_bundle()，create_text / create_file 保留为薄封装
+    # （脚本和测试还在用，语义就是「一段文本 / 一个文件」的 bundle）。
 
-    def create_text(
+    def create_bundle(
         self,
-        text: str,
         *,
+        text: str | None = None,
+        files: Iterable[tuple[str, Any, str]] = (),
         ttl_hours: int | None = None,
         max_reads: int | None = None,
         extract_code: str | None = None,
         no_code: bool = False,
-        markdown: bool = False,
         kind: str | None = None,
         ip: str | None = None,
         base_url: str = "",
         owner_id: str | None = None,
     ) -> Created:
-        payload = text.encode("utf-8")
-        if not payload:
-            raise ShareError("empty", "内容不能为空")
-        if len(payload) > self.settings.max_text_bytes:
-            raise ShareError(
-                "too_large",
-                f"文本超过 {self.settings.max_text_bytes // 1024} KB 上限",
-                413,
-            )
-        # 识别在服务端做一次、随分享存下来：分享页就能用和上传页一样的形态渲染，
-        # 不会出现「发出去之后变成了另一个样子」。
-        analysis = analyze(text, force=kind)
-        if analysis.kind == "markdown":
-            markdown = True
-        if no_code:
-            extract_code, _generated = None, False
-        else:
-            extract_code, _generated = self._resolve_extract_code(extract_code)
-        ttl = self._resolve_ttl(ttl_hours)
-        reads = self._resolve_reads(max_reads)
-        code_hash = code_salt = None
-        if extract_code:
-            code_hash, code_salt = security.hash_extract_code(extract_code)
-        share_id = self._new_id()
-        token = security.new_manage_token()
-        sha, md5, crc = _digests(payload)
-        with transaction(self.settings.db_path) as conn:
-            conn.execute(
-                """INSERT INTO shares
-                   (id, kind, file_name, content_type, size, sha256, md5, crc32, blob,
-                    text_content, markdown, detected_kind, language, extract_hash,
-                    extract_salt, manage_token, created_at, expires_at, max_reads,
-                    read_count, owner_id)
-                   VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,0,?)""",
-                (
-                    share_id,
-                    "text",
-                    None,
-                    "text/plain; charset=utf-8",
-                    len(payload),
-                    sha,
-                    md5,
-                    crc,
-                    text,
-                    1 if markdown else 0,
-                    analysis.kind,
-                    analysis.language,
-                    code_hash,
-                    code_salt,
-                    token,
-                    _now(),
-                    ttl,
-                    reads,
-                    owner_id,
-                ),
-            )
-            self._audit(conn, "create_text", share_id, ip, f"{len(payload)}B {analysis.kind}")
-            row = self._get_row(conn, share_id)
-        view = self._view(row, base_url)
-        view["detected"].update(analysis.to_dict())
-        return Created(view, extract_code, token)
+        """创建一条分享，可同时带文本与多个文件。
 
-    def create_file(
-        self,
-        *,
-        file_name: str,
-        data: Iterable[bytes] | bytes,
-        content_type: str,
-        ttl_hours: int | None = None,
-        max_reads: int | None = None,
-        extract_code: str | None = None,
-        no_code: bool = False,
-        ip: str | None = None,
-        base_url: str = "",
-        owner_id: str | None = None,
-    ) -> Created:
-        """流式写盘：边写边算摘要，不把整个文件读进内存。
+        ``files`` 是 ``(file_name, chunks, content_type)`` 序列；``chunks``
+        可以是 bytes，也可以是可迭代的 bytes（流式，不整块进内存）。
 
-        同时嗅探前 256 KB：如果它是文本（.log / .md / .py / .csv …），
-        就把识别结果一起存下来 —— 分享页于是能按「日志 / 表格 / 代码」渲染，
-        而不是甩一个下载按钮。二进制（.bin 固件）不嗅探成功，照旧走下载。
+        失败时清理已经落盘的文件 —— 不能因为第三个文件超限就留下两个孤儿。
         """
-        ttl = self._resolve_ttl(ttl_hours)
-        reads = self._resolve_reads(max_reads)
+        body = text or ""
+        file_list = list(files)
+        if not body.strip() and not file_list:
+            raise ShareError("empty", "内容不能为空")
+
+        if body:
+            payload = body.encode("utf-8")
+            if len(payload) > self.settings.max_text_bytes:
+                raise ShareError(
+                    "too_large",
+                    f"文本超过 {self.settings.max_text_bytes // 1024} KB 上限",
+                    413,
+                )
         if no_code:
             extract_code = None
         else:
             extract_code, _generated = self._resolve_extract_code(extract_code)
+        ttl = self._resolve_ttl(ttl_hours)
+        reads = self._resolve_reads(max_reads)
         share_id = self._new_id()
         token = security.new_manage_token()
-        relative = f"{share_id[:2]}/{share_id}"
-        target = self._blob_path(relative)
-        target.parent.mkdir(parents=True, exist_ok=True)
 
-        sha = hashlib.sha256()
-        md5 = hashlib.md5()  # noqa: S324 —— 固件校验和
-        crc = 0
-        size = 0
-        head = bytearray()
-        limit = self.settings.max_file_bytes
-        chunks = [data] if isinstance(data, (bytes, bytearray)) else data
+        analysis = analyze(body, force=kind) if body.strip() else None
+        markdown = bool(analysis and analysis.kind == "markdown")
+
+        written: list[Path] = []
+        stored: list[dict[str, Any]] = []
         try:
-            with target.open("wb") as fh:
-                for chunk in chunks:
-                    if not chunk:
-                        continue
-                    size += len(chunk)
-                    if size > limit:
-                        raise ShareError(
-                            "too_large",
-                            f"文件超过 {limit // (1024 * 1024)} MB 上限",
-                            413,
-                        )
-                    if len(head) < TEXT_HEAD_BYTES:
-                        head.extend(chunk[: TEXT_HEAD_BYTES - len(head)])
-                    sha.update(chunk)
-                    md5.update(chunk)
-                    crc = zlib.crc32(chunk, crc)
-                    fh.write(chunk)
-            if size == 0:
-                raise ShareError("empty", "文件是空的")
-
-            analysis = analyze_file(bytes(head), file_name, content_type)
-            detected_kind = analysis.kind if analysis else _binary_kind(file_name, content_type)
-            language = analysis.language if analysis else None
+            for index, entry in enumerate(file_list):
+                file_name, chunks, content_type = entry
+                name = file_name or f"file-{index + 1}.bin"
+                ctype = content_type or "application/octet-stream"
+                # 第 0 个文件沿用旧路径 <xx>/<id>：单文件分享的磁盘布局
+                # 与重构前保持一致，回滚和排查都不用换思路。
+                suffix = "" if index == 0 else f"-{index}"
+                relative = f"{share_id[:2]}/{share_id}{suffix}"
+                target = self._blob_path(relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                written.append(target)
+                stored.append(
+                    {
+                        "idx": index,
+                        "relative": relative,
+                        "file_name": name,
+                        "content_type": ctype,
+                        **self._write_blob(target, chunks, name, ctype),
+                    }
+                )
 
             code_hash = code_salt = None
             if extract_code:
                 code_hash, code_salt = security.hash_extract_code(extract_code)
+
+            text_bytes = body.encode("utf-8") if body else b""
+            total_size = sum(item["size"] for item in stored) + len(text_bytes)
+
+            if len(stored) == 1:
+                head_file = stored[0]
+                top_name = head_file["file_name"]
+                top_type = head_file["content_type"]
+                top_sha = head_file["sha256"]
+                top_md5 = head_file["md5"]
+                top_crc = head_file["crc32"]
+            elif stored:
+                top_name = f"{len(stored)} 个文件"
+                top_type = "application/octet-stream"
+                top_sha = top_md5 = top_crc = ""
+            else:
+                top_name = None
+                top_type = "text/plain; charset=utf-8"
+                top_sha, top_md5, top_crc = _digests(text_bytes)
+
+            if analysis is not None:
+                detected_kind = analysis.kind
+                language = analysis.language
+            elif stored:
+                detected_kind = stored[0]["detected_kind"]
+                language = stored[0]["language"]
+            else:
+                detected_kind = None
+                language = None
+
             with transaction(self.settings.db_path) as conn:
                 conn.execute(
                     """INSERT INTO shares
                        (id, kind, file_name, content_type, size, sha256, md5, crc32,
                         blob, text_content, markdown, detected_kind, language,
                         extract_hash, extract_salt, manage_token, created_at,
-                        expires_at, max_reads, read_count, owner_id)
-                       VALUES (?,?,?,?,?,?,?,?,?,NULL,0,?,?,?,?,?,?,?,?,0,?)""",
+                        expires_at, max_reads, read_count, owner_id, file_count)
+                       VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,0,?,?)""",
                     (
                         share_id,
-                        "file",
-                        file_name or "download.bin",
-                        content_type or "application/octet-stream",
-                        size,
-                        sha.hexdigest(),
-                        md5.hexdigest(),
-                        f"{crc & 0xFFFFFFFF:08x}",
-                        relative,
+                        "file" if stored else "text",
+                        top_name,
+                        top_type,
+                        total_size,
+                        top_sha,
+                        top_md5,
+                        top_crc,
+                        body or None,
+                        1 if markdown else 0,
                         detected_kind,
                         language,
                         code_hash,
@@ -387,17 +392,106 @@ class Service:
                         ttl,
                         reads,
                         owner_id,
+                        len(stored),
                     ),
                 )
-                self._audit(conn, "create_file", share_id, ip, f"{size}B {detected_kind or 'bin'}")
+                for item in stored:
+                    conn.execute(
+                        """INSERT INTO share_files
+                           (share_id, idx, file_name, content_type, size, sha256,
+                            md5, crc32, blob, detected_kind, language)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            share_id,
+                            item["idx"],
+                            item["file_name"],
+                            item["content_type"],
+                            item["size"],
+                            item["sha256"],
+                            item["md5"],
+                            item["crc32"],
+                            item["relative"],
+                            item["detected_kind"],
+                            item["language"],
+                        ),
+                    )
+                detail = (
+                    f"{len(stored)} files {total_size}B"
+                    if stored
+                    else f"{total_size}B text"
+                )
+                self._audit(conn, "create", share_id, ip, detail)
                 row = self._get_row(conn, share_id)
+                files_view = self._files_of(conn, share_id)
         except BaseException:
-            target.unlink(missing_ok=True)
+            for path in written:
+                path.unlink(missing_ok=True)
             raise
-        view = self._view(row, base_url)
+
+        view = self._view(row, base_url, files_view)
         if analysis is not None:
             view["detected"].update(analysis.to_dict())
         return Created(view, extract_code, token)
+
+    def _write_blob(
+        self, target: Path, chunks: Any, file_name: str, content_type: str
+    ) -> dict[str, Any]:
+        """流式写一个文件并算摘要；顺带嗅探前 256 KB 决定它是什么形态。"""
+        sha = hashlib.sha256()
+        md5 = hashlib.md5()  # noqa: S324 —— 固件校验和
+        crc = 0
+        size = 0
+        head = bytearray()
+        limit = self.settings.max_file_bytes
+        source = [chunks] if isinstance(chunks, (bytes, bytearray)) else chunks
+        with target.open("wb") as fh:
+            for chunk in source:
+                if not chunk:
+                    continue
+                size += len(chunk)
+                if size > limit:
+                    raise ShareError(
+                        "too_large",
+                        f"文件超过 {limit // (1024 * 1024)} MB 上限",
+                        413,
+                    )
+                if len(head) < TEXT_HEAD_BYTES:
+                    head.extend(chunk[: TEXT_HEAD_BYTES - len(head)])
+                sha.update(chunk)
+                md5.update(chunk)
+                crc = zlib.crc32(chunk, crc)
+                fh.write(chunk)
+        if size == 0:
+            raise ShareError("empty", "文件是空的")
+
+        analysis = analyze_file(bytes(head), file_name, content_type)
+        return {
+            "size": size,
+            "sha256": sha.hexdigest(),
+            "md5": md5.hexdigest(),
+            "crc32": f"{crc & 0xFFFFFFFF:08x}",
+            "detected_kind": (
+                analysis.kind if analysis else _binary_kind(file_name, content_type)
+            ),
+            "language": analysis.language if analysis else None,
+        }
+
+
+    def create_text(self, text: str, **kwargs) -> Created:
+        """一段文本的分享。薄封装 —— 真正的实现在 create_bundle。"""
+        markdown = kwargs.pop("markdown", False)
+        kind = kwargs.pop("kind", None)
+        created = self.create_bundle(text=text, kind=kind, **kwargs)
+        if markdown:
+            created.share["markdown"] = True
+        return created
+
+    def create_file(self, *, file_name: str, data, content_type: str, **kwargs) -> Created:
+        """一个文件的分享。薄封装 —— 真正的实现在 create_bundle。"""
+        return self.create_bundle(
+            files=[(file_name, data, content_type)],
+            **kwargs,
+        )
 
     def _resolve_extract_code(self, code: str | None) -> tuple[str | None, bool]:
         """决定这份分享的提取码。
@@ -505,8 +599,10 @@ class Service:
             self._audit(conn, "claim", share_id, ip)
             row = self._get_row(conn, share_id)
 
-            payload = self._extract_payload(row)
-            view = self._view(row, base_url)
+            # 多文件分享要把清单一起给前端，否则它不知道有几个文件
+            files_view = self._files_of(conn, share_id) if row["file_count"] else []
+            payload = self._extract_payload(row, conn)
+            view = self._view(row, base_url, files_view)
             view["claimed"] = True
             view["claim_token"] = token
         return view, payload, token
@@ -537,7 +633,8 @@ class Service:
             if exhausted:
                 self._burn(conn, row, "exhausted", ip)
                 row = self._get_row(conn, share_id)
-            return self._view(row)
+            files_view = self._files_of(conn, share_id) if row["file_count"] else []
+            return self._view(row, "", files_view)
 
     def _expire_claim_if_needed(self, conn, row, ip: str | None = None) -> None:
         """占位超时 = 那次预览当作已消费（防止只打开不关闭就无限白看）。"""
@@ -557,21 +654,52 @@ class Service:
         if exhausted or self._state(self._get_row(conn, row["id"])) == "exhausted":
             self._burn(conn, self._get_row(conn, row["id"]), "exhausted", ip)
 
-    def _extract_payload(self, row) -> str | FilePayload | None:
-        """把正文取出来（文件走传送带），供响应使用。"""
+    def _extract_payload(self, row, conn=None) -> str | FilePayload | None:
+        """把正文取出来（文件走传送带），供响应使用。
+
+        单文件分享返回那个文件；多文件分享返回 ``None`` —— 调用方应当
+        走 ``stage_file()`` 逐个取，或者走打包下载。
+        """
         if row["kind"] == "file":
-            if not row["blob"]:
+            files = self._file_rows(conn, row["id"]) if conn is not None else self._file_rows(None, row["id"])
+            if not files:
                 raise ShareError("gone", "内容已被焚毁", 410)
-            source = self._blob_path(row["blob"])
-            if not source.exists():
-                raise ShareError("gone", "内容已被焚毁", 410)
-            return FilePayload(
-                path=self._stage(source),
-                file_name=row["file_name"] or "download.bin",
-                content_type=row["content_type"],
-                size=row["size"],
-            )
+            if len(files) > 1:
+                return None
+            return self._file_payload(files[0])
         return row["text_content"]
+
+    def _file_rows(self, conn, share_id: str):
+        """取文件行（含 blob 路径）。传入 conn 时复用事务，否则自己开一个。"""
+        sql = (
+            "SELECT idx, file_name, content_type, size, blob"
+            " FROM share_files WHERE share_id = ? ORDER BY idx"
+        )
+        if conn is not None:
+            return conn.execute(sql, (share_id,)).fetchall()
+        with session(self.settings.db_path) as own:
+            return own.execute(sql, (share_id,)).fetchall()
+
+    def _file_payload(self, file_row) -> FilePayload:
+        if not file_row["blob"]:
+            raise ShareError("gone", "内容已被焚毁", 410)
+        source = self._blob_path(file_row["blob"])
+        if not source.exists():
+            raise ShareError("gone", "内容已被焚毁", 410)
+        return FilePayload(
+            path=self._stage(source),
+            file_name=file_row["file_name"] or "download.bin",
+            content_type=file_row["content_type"],
+            size=file_row["size"],
+        )
+
+    def stage_file(self, share_id: str, idx: int) -> FilePayload:
+        """取某一个文件（不扣次数）。分享页逐个预览/下载时用。"""
+        rows = self._file_rows(None, share_id)
+        for file_row in rows:
+            if file_row["idx"] == idx:
+                return self._file_payload(file_row)
+        raise ShareError("not_found", "文件不存在", 404)
 
     def open_share(
         self,
@@ -617,22 +745,17 @@ class Service:
                 self._audit(conn, "unlock_failed", share_id, ip)
                 raise ShareError("bad_code", "提取码不正确", 403)
 
-            text: str | None = row["text_content"]
             if row["kind"] == "file":
-                if not row["blob"]:
+                files = self._file_rows(conn, share_id)
+                if not files:
                     raise ShareError("gone", "内容已被焚毁", 410)
-                source = self._blob_path(row["blob"])
-                if not source.exists():
-                    raise ShareError("gone", "内容已被焚毁", 410)
-                staged = self._stage(source)
-                payload: str | FilePayload | None = FilePayload(
-                    path=staged,
-                    file_name=row["file_name"] or "download.bin",
-                    content_type=row["content_type"],
-                    size=row["size"],
+                # 多文件分享没有「单个 payload」：调用方据 view 里的 files 列表
+                # 逐个取。单文件保持原来的流式行为，兼容脚本与 OTA。
+                payload: str | FilePayload | None = (
+                    self._file_payload(files[0]) if len(files) == 1 else None
                 )
             else:
-                payload = text
+                payload = row["text_content"]
 
             if consume:
                 read_count = row["read_count"] + 1
@@ -652,6 +775,32 @@ class Service:
             view = self._view(row, base_url)
 
         return view, payload
+
+    def text_of(self, share_id: str) -> str | None:
+        """只取正文文本（多文件分享的清单里要带上它）。"""
+        with session(self.settings.db_path) as conn:
+            row = self._get_row(conn, share_id)
+        if row["burned_at"] is not None:
+            return None
+        return row["text_content"]
+
+    def verify_claim(self, share_id: str, token: str | None) -> bool:
+        """校验 claim_token 是否属于这份分享且未过期。
+
+        分享页在 claim 之后逐个取文件时用 —— 这样就不必为每个文件
+        再走一遍提取码校验，也不会重复扣次数。
+        """
+        if not token:
+            return False
+        with session(self.settings.db_path) as conn:
+            row = self._get_row(conn, share_id)
+            if row["claim_token"] is None:
+                return False
+            if row["claim_expires_at"] is None or row["claim_expires_at"] < _now():
+                return False
+            import hmac as _hmac
+
+            return _hmac.compare_digest(row["claim_token"], token)
 
     def _stage(self, source: Path) -> Path:
         """给即将发出的文件造一个临时副本（优先硬链接，跨卷时退回复制）。"""
@@ -781,18 +930,24 @@ class Service:
             )
             self._audit(conn, "ota_pull", ota["share_id"], ip, ota["label"])
 
-            if row["blob"]:
-                staged = self._stage(self.read_blob(row["blob"]))
+            files = self._file_rows(conn, ota["share_id"])
+            if files:
+                # 设备直链只对单文件有意义（固件/镜像）。多文件请用分享页。
+                if len(files) > 1:
+                    raise ShareError(
+                        "ota_needs_single_file", "这份分享含多个文件，请用分享页下载", 400
+                    )
+                payload = self._file_payload(files[0])
             else:
                 # 文本分享也能被 OTA 拉走：落一个临时文件给设备
                 staged = self.settings.tmp_dir / f"send-{secrets.token_hex(8)}.txt"
                 staged.write_text(row["text_content"] or "", encoding="utf-8")
-            payload = FilePayload(
-                path=staged,
-                file_name=row["file_name"] or f"{row['id']}.txt",
-                content_type=row["content_type"],
-                size=row["size"],
-            )
+                payload = FilePayload(
+                    path=staged,
+                    file_name=row["file_name"] or f"{row['id']}.txt",
+                    content_type=row["content_type"],
+                    size=row["size"],
+                )
             view = self._view(row)
         return view, payload
 

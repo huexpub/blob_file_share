@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import hmac
 from typing import Any
 from urllib.parse import quote
@@ -480,17 +481,28 @@ async def create_share(request: Request, admin: str = Depends(require_admin)) ->
 
     if content_type.startswith("multipart/form-data"):
         form = await request.form()
-        upload = form.get("file")
-        if not isinstance(upload, UploadFile):
-            raise ShareError("no_file", "缺少 file 字段")
-        created = service.create_file(
-            file_name=upload.filename or "download.bin",
-            data=upload.file,
-            content_type=upload.content_type or "application/octet-stream",
+        # 一次发布 = 一条分享：多个 file 字段 + 可选的 text 字段，
+        # 全部装进同一个 share。以前是每个文件建一条，发两个文件会得到
+        # 两条链接和两条消息，那不对。
+        uploads = [item for item in form.getlist("file") if isinstance(item, UploadFile)]
+        raw_text = _str_field(form.get("text"))
+        if not uploads and not raw_text:
+            raise ShareError("no_file", "至少需要一个 file 字段或 text 字段")
+        created = service.create_bundle(
+            text=raw_text,
+            files=[
+                (
+                    upload.filename or "download.bin",
+                    upload.file,
+                    upload.content_type or "application/octet-stream",
+                )
+                for upload in uploads
+            ],
             ttl_hours=_int_field(form.get("ttl_hours")),
             max_reads=_int_field(form.get("max_reads")),
             extract_code=_str_field(form.get("extract_code")),
             no_code=_bool_field(form.get("no_code")),
+            kind=_str_field(form.get("kind")),
             ip=client_ip(request),
             base_url=base,
             owner_id=owner,
@@ -632,51 +644,53 @@ async def create_batch_share(request: Request) -> JSONResponse:
     no_code = _bool_field(form.get("no_code"))
 
     service = get_service(request)
-    created = []
-    for upload in uploads:
-        item = service.create_file(
-            file_name=upload.filename or "download.bin",
-            data=upload.file,
-            content_type=upload.content_type or "application/octet-stream",
-            ttl_hours=ttl_hours,
-            max_reads=max_reads,
-            extract_code=extract_code,
-            no_code=no_code,
-            ip=client_ip(request),
-            base_url=base_url(request),
-            owner_id=owner,
-        )
-        created.append({
-            **item.share,
-            "manage_token": item.manage_token,
-            "extract_code": item.extract_code,
-        })
-
+    # 一次 CI 上传同样只产生一条分享：多个文件共享一个链接、一个提取码。
+    item = service.create_bundle(
+        files=[
+            (
+                upload.filename or "download.bin",
+                upload.file,
+                upload.content_type or "application/octet-stream",
+            )
+            for upload in uploads
+        ],
+        ttl_hours=ttl_hours,
+        max_reads=max_reads,
+        extract_code=extract_code,
+        no_code=no_code,
+        ip=client_ip(request),
+        base_url=base_url(request),
+        owner_id=owner,
+    )
+    share = {
+        **item.share,
+        "manage_token": item.manage_token,
+        "extract_code": item.extract_code,
+    }
     return JSONResponse(
-        {"items": created, "message": _batch_share_message(created), "owner": owner},
+        {"share": share, "message": _share_message(share), "owner": owner},
         status_code=201,
     )
 
 
-def _batch_share_message(items: list[dict[str, Any]]) -> str:
-    if len(items) == 1:
-        item = items[0]
-        label = item.get("file_name") or item.get("detected", {}).get("kind_label") or "文件"
-        lines = [f"我分享给你一个文件（{label}）：", item["url"]]
-        if item.get("extract_code"):
-            lines.append(f"分享码 {item['extract_code']}")
-        if item.get("max_reads") == 1:
-            lines.append("阅后即焚，打开看完就没了。")
-        return "\n".join(lines)
+def _share_message(share: dict[str, Any]) -> str:
+    """生成可直接转发的那段话。一次分享不论几个文件，都只有一条链接。"""
+    count = share.get("file_count") or 0
+    if count > 1:
+        names = [item["file_name"] for item in share.get("files", [])]
+        label = f"一个包含 {count} 个文件的分享"
+        lines = [f"我分享给你{label}：", share["url"]]
+        if names:
+            lines.append("（" + "、".join(names) + "）")
+    else:
+        name = share.get("file_name") or share.get("detected", {}).get("kind_label")
+        label = f"一个文件（{name}）" if count == 1 and name else "一段内容"
+        lines = [f"我分享给你{label}：", share["url"]]
 
-    lines = [f"我分享给你 {len(items)} 个文件："]
-    for index, item in enumerate(items, 1):
-        label = item.get("file_name") or "文件"
-        lines.extend([f"{index}. {label}", f"   {item['url']}"])
-        if item.get("extract_code"):
-            lines.append(f"   分享码 {item['extract_code']}")
-    if any(item.get("max_reads") == 1 for item in items):
-        lines.append("（标 1 次的是阅后即焚，打开看完就没了）")
+    if share.get("extract_code"):
+        lines.append(f"分享码 {share['extract_code']}")
+    if share.get("max_reads") == 1:
+        lines.append("阅后即焚，打开看完就没了。")
     return "\n".join(lines)
 
 
@@ -768,12 +782,67 @@ def claim(share_id: str, request: Request, code: str | None = None) -> Response:
             background=BackgroundTask(service.release, payload),
         )
 
+    if payload is None:
+        # 多文件分享：返回一份清单（含文本），文件本身走
+        # GET /shares/{id}/file/{idx}?claim_token=... 逐个取。
+        # 否则就得把 N 个文件塞进一个响应里，既没法逐个预览也吃内存。
+        return JSONResponse(
+            {
+                "manifest": True,
+                "share": view,
+                "text": service.text_of(share_id),
+                "files": view["files"],
+            },
+            headers={**_share_headers(view), "X-Claim-Token": claim_token},
+        )
+
     response = PlainTextResponse(
         payload if isinstance(payload, str) else "",
         headers={**_share_headers(view), "X-Claim-Token": claim_token},
     )
     response.headers["Content-Type"] = view["content_type"]
     return response
+
+
+@router.get("/shares/{share_id}/file/{idx}")
+def share_file(
+    share_id: str,
+    idx: int,
+    request: Request,
+    code: str | None = None,
+    claim_token: str | None = None,
+    inline: bool = False,
+) -> Response:
+    """取多文件分享里的某一个文件。
+
+    不扣次数：消费仍然只发生在 ``/commit``（关闭页面）。这里只校验
+    调用方确实已经打开过这份分享（带了有效 claim_token 或提取码票据）。
+    """
+    service = get_service(request)
+    verified = _unlocked(request, share_id) or service.verify_claim(
+        share_id, claim_token
+    )
+    view = service.peek(share_id, base_url(request))
+    if not verified:
+        # 没解锁就先要求提取码，和 claim 的行为保持一致
+        view, _ = service.open_share(
+            share_id,
+            code=code,
+            consume=False,
+            ip=client_ip(request),
+            base_url=base_url(request),
+        )
+    payload = service.stage_file(share_id, idx)
+    disposition = "inline" if inline else _content_disposition(payload.file_name)
+    return FileResponse(
+        payload.path,
+        media_type=payload.content_type,
+        headers={
+            **_share_headers(view),
+            "Content-Disposition": disposition,
+        },
+        background=BackgroundTask(service.release, payload),
+    )
 
 
 @router.post("/shares/{share_id}/commit")
@@ -872,12 +941,16 @@ def share_download(
     request: Request,
     code: str | None = None,
     inline: bool = False,
+    claim_token: str | None = None,
 ) -> Response:
     service = get_service(request)
+    # 分享页已经 claim 过（带了 claim_token）：用票据证明身份，
+    # 而不是让用户再输一遍提取码。消费仍然只在 commit 时发生。
+    verified = _unlocked(request, share_id) or service.verify_claim(share_id, claim_token)
     view, payload = service.open_share(
         share_id,
         code=code,
-        verified=_unlocked(request, share_id),
+        verified=verified,
         ip=client_ip(request),
         base_url=base_url(request),
     )
@@ -893,6 +966,11 @@ def share_download(
             headers=headers,
             background=BackgroundTask(service.release, payload),
         )
+    if payload is None:
+        # 多文件分享走 download：现场打一个 zip 流回去。
+        # 不预先落盘 —— 压缩直接流式写到响应体，大文件也不会 OOM。
+        return _zip_response(service, view)
+
     # 文本分享也能走 download：直接以附件形式吐文本
     text = payload if isinstance(payload, str) else ""
     response = PlainTextResponse(text, headers=_share_headers(view))
@@ -901,6 +979,51 @@ def share_download(
         view["file_name"] or f"{view['id']}.txt"
     )
     return response
+
+
+def _zip_response(service: Service, view: dict[str, Any]) -> Response:
+    """把一份分享里的所有文件（含文本）打成一个 zip，流式返回。"""
+    import zipfile
+
+    share_id = view["id"]
+    rows = service._file_rows(None, share_id)
+    archive_path = service.settings.tmp_dir / f"send-{secrets.token_hex(8)}.zip"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            text = service.text_of(share_id)
+            if text:
+                zf.writestr("content.txt", text)
+            used: set[str] = set()
+            for row in rows:
+                name = _unique_name(used, row["file_name"])
+                zf.write(service.read_blob(row["blob"]), arcname=name)
+    except BaseException:
+        archive_path.unlink(missing_ok=True)
+        raise
+
+    headers = _share_headers(view)
+    headers["Content-Disposition"] = _content_disposition(f"bfs-{share_id}.zip")
+    return FileResponse(
+        archive_path,
+        media_type="application/zip",
+        headers=headers,
+        background=BackgroundTask(lambda: archive_path.unlink(missing_ok=True)),
+    )
+
+
+def _unique_name(used: set[str], name: str) -> str:
+    """zip 里同名的文件加后缀，否则解压会互相覆盖。"""
+    candidate = name
+    stem, dot, ext = name.rpartition(".")
+    suffix = 2
+    while candidate.casefold() in used:
+        candidate = (
+            f"{stem}-{suffix}.{ext}" if dot else f"{name}-{suffix}"
+        )
+        suffix += 1
+    used.add(candidate.casefold())
+    return candidate
 
 
 @router.post("/shares/{share_id}/burn")

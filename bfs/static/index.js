@@ -715,42 +715,27 @@ async function send({ ttl, reads, code, noCode }) {
   button.disabled = true;
   $('#progressWrap').classList.remove('hidden');
   $('#progressBar').style.width = '0%';
-  const created = [];
 
   try {
-    for (let index = 0; index < files.length; index += 1) {
-      const file = files[index];
-      const form = new FormData();
-      form.append('file', file);
-      form.append('ttl_hours', String(ttl));
-      form.append('max_reads', String(reads));
-      if (noCode) form.append('no_code', '1');
-      else if (code) form.append('extract_code', code);
-      $('#progressText').textContent = `上传 ${index + 1}/${files.length}：${file.name}`;
-      const result = await uploadWithProgress('/api/shares', form, (loaded, total) => {
-        $('#progressBar').style.width = `${total ? Math.round((loaded / total) * 100) : 0}%`;
-      });
-      created.push(result);
-      remember(result);
-    }
+    // 一次发布 = 一条分享。粘贴的文字和拖进来的文件全部放进同一个请求，
+    // 服务端据此建一条记录：一个链接、一个提取码、一次焚毁。
+    const form = new FormData();
+    for (const file of files) form.append('file', file);
+    if (draft.trim()) form.append('text', draft);
+    form.append('ttl_hours', String(ttl));
+    form.append('max_reads', String(reads));
+    if (noCode) form.append('no_code', '1');
+    else if (code) form.append('extract_code', code);
+    if (forcedKind) form.append('kind', forcedKind);
 
-    if (draft.trim()) {
-      $('#progressText').textContent = '创建文本分享…';
-      $('#progressBar').style.width = '100%';
-      const result = await api('/api/shares', {
-        method: 'POST',
-        body: JSON.stringify({
-          text: draft,
-          ttl_hours: ttl,
-          max_reads: reads,
-          extract_code: noCode ? null : code || null,
-          no_code: noCode,
-          kind: forcedKind || null
-        })
-      });
-      created.push(result);
-      remember(result);
-    }
+    const parts = [];
+    if (files.length) parts.push(`${files.length} 个文件`);
+    if (draft.trim()) parts.push('文本');
+    $('#progressText').textContent = `上传中（${parts.join(' + ') || '内容'}）…`;
+
+    const created = await uploadWithProgress('/api/shares', form, (loaded, total) => {
+      $('#progressBar').style.width = `${total ? Math.round((loaded / total) * 100) : 0}%`;
+    });
 
     // 发完就清场：内容已经出去了，留着草稿只会让人以为还没发
     draft = '';
@@ -761,11 +746,12 @@ async function send({ ttl, reads, code, noCode }) {
     updateFirmwareHint();
     syncEmptyState();
 
-    if (!created.length) return;
-    currentBatch = created;
+    if (!created || !created.id) return;
+    remember(created);
+    currentBatch = [created];
     // 复制成功就到此为止：消息已经在剪贴板里，页面上不再回显一遍
     // （回显等于让用户去核对一段已经复制好的文字，纯属多余）。
-    await autoCopy(created);
+    await autoCopy([created]);
   } catch (error) {
     $('#errorText').textContent = error.message || '生成失败';
     toast(error.message || '生成失败', 'err');
@@ -792,39 +778,49 @@ const KIND_PHRASE = {
   markdown: () => '一份 Markdown',
   stacktrace: () => '一段报错堆栈',
   urls: () => '一组链接',
-  image: (found, share) => (share.file_name ? `一张图片（${share.file_name}）` : '一张图片'),
-  binary: (found, share) => (share.file_name ? `一个文件（${share.file_name}）` : '一个文件'),
+  image: (found, share) =>
+    share.file_name ? `一张图片（${share.file_name}）` : '一张图片',
+  binary: (found, share) =>
+    share.file_name ? `一个文件（${share.file_name}）` : '一个文件',
   text: () => '一段文本'
 };
 
 function describeShare(share) {
+  const count = share.file_count || 0;
+  const hasText = Boolean(
+    share.detected && share.detected.kind && share.detected.kind !== 'binary'
+  );
+
+  // 一次分享里的文件数优先：它才是对方最关心的「这是几个东西」
+  if (count > 1) {
+    return `一个包含 ${count} 个文件的分享`;
+  }
+  if (count === 1 && hasText) {
+    const name = share.file_name || (share.files && share.files[0]?.file_name);
+    return name ? `一段文本和一个文件（${name}）` : '一段文本和一个文件';
+  }
+  if (count === 1) {
+    const name = share.file_name || (share.files && share.files[0]?.file_name);
+    return name ? `一个文件（${name}）` : '一个文件';
+  }
+
   const found = share.detected || {};
   const phrase = KIND_PHRASE[found.kind];
   if (phrase) return phrase(found, share);
-  return share.file_name ? `一个文件（${share.file_name}）` : '一段内容';
+  return '一段内容';
 }
 
 function shareMessage(share) {
   const lines = [`我分享给你${describeShare(share)}：`, share.url];
+  // 多文件分享附上清单，对方一眼知道包里有什么
+  const names = (share.files || []).map((item) => item.file_name);
+  if (names.length > 1) lines.push(`文件：${names.join('、')}`);
   if (share.extract_code) lines.push(`分享码 ${share.extract_code}`);
   // 一次性链接要提前说，否则对方随手关掉就再也打不开了
   if (share.max_reads === 1) lines.push('阅后即焚，打开看完就没了。');
   else if (share.max_reads > 1) lines.push(`可打开 ${share.max_reads} 次。`);
-  return lines.join('\n');
-}
-
-function batchMessage(list) {
-  if (list.length === 1) return shareMessage(list[0]);
-  const lines = [`我分享给你 ${list.length} 个东西：`];
-  list.forEach((share, index) => {
-    lines.push(`${index + 1}. ${describeShare(share)}`);
-    lines.push(`   ${share.url}`);
-    if (share.extract_code) lines.push(`   分享码 ${share.extract_code}`);
-  });
-  if (list.some((share) => share.max_reads === 1)) {
-    lines.push('（标 1 次的是阅后即焚，打开看完就没了）');
-  }
-  return lines.join('\n');
+  return lines.join('
+');
 }
 
 /* ---------------------------------------------------------------- 生成后的轻提示 */
@@ -836,13 +832,14 @@ function batchMessage(list) {
  * 复制失败才展开结果弹窗，否则用户拿不到那段话。
  */
 async function autoCopy(created) {
-  const message = batchMessage(created);
+  // 一次发布只有一条分享，所以永远只有一段说明
+  const message = shareMessage(created[0]);
   const ok = await copyText(message);
   if (ok) {
-    toast(created.length > 1 ? `已复制 ${created.length} 条分享说明` : '已复制分享说明', 'ok', 2600);
+    toast('已复制分享说明', 'ok', 2600);
     return true;
   }
-  if (created.length) showResult(created[0], { count: created.length });
+  showResult(created[0]);
   toast('自动复制被浏览器拦住了，请手动复制', 'warn', 4200);
   return false;
 }

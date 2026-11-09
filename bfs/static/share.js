@@ -25,10 +25,9 @@ import {
   BOOT,
   copyText,
   escapeHtml,
-  hexdump,
+  formatBytes,
   icon,
   initTheme,
-  isHexLike,
   isImage,
   isMarkdown,
   isPdf,
@@ -166,8 +165,18 @@ async function reveal() {
       throw error;
     }
     claimToken = res.headers.get('X-Claim-Token') || '';
+    const contentTypeHeader = res.headers.get('content-type') || '';
 
-    if (share.kind === 'text') {
+    if (contentTypeHeader.includes('application/json')) {
+      // 多文件分享：服务端只回清单，文件本身按需逐个取
+      const manifest = await res.json();
+      content = {
+        type: 'bundle',
+        text: manifest.text || '',
+        files: manifest.files || [],
+        detected: (manifest.share && manifest.share.detected) || {}
+      };
+    } else if (share.kind === 'text') {
       const text = await res.text();
       let html = '';
       let detected = share.detected || {};
@@ -200,6 +209,11 @@ function renderBody() {
   const host = $('#viewer');
   const found = content.detected || share.detected || {};
 
+  if (content.type === 'bundle') {
+    renderBundle();
+    return;
+  }
+
   if (content.type === 'text') {
     const text = content.text ?? '';
     host.innerHTML = content.html || `<pre class="plain">${escapeHtml(text)}</pre>`;
@@ -216,25 +230,175 @@ function renderBody() {
     host.innerHTML = `<iframe src="${URL.createObjectURL(blob)}" title="PDF"></iframe>`;
   } else if (isImage(name, type)) {
     host.innerHTML = `<img src="${URL.createObjectURL(blob)}" alt="${escapeHtml(name)}" />`;
-  } else if (isHexLike(name)) {
-    blob.arrayBuffer().then((buffer) => {
-      host.innerHTML = `<div class="hexdump">${hexdump(new Uint8Array(buffer))}</div>`;
-    });
   } else if (isProbablyText(name, type)) {
     // .md / .txt / .log / .py / .csv 这类：浏览器能读就渲染出来，
     // 只给一个下载按钮等于让人先存盘再看，没必要。
     renderTextFile(blob, name, type, actions);
     return;
   } else {
+    // 固件 / 压缩包 / 可执行文件：不显示 hexdump。
+    // 十六进制对「我要把它拿走」这个真实意图毫无帮助，只给名称、大小和下载。
     host.innerHTML = `
       <div class="viewer-fallback">
         ${icon('file', 'icon icon--lg')}
         <strong>${escapeHtml(name)}</strong>
-        <span class="muted-2">这个类型浏览器无法预览，请下载后打开</span>
+        <span class="muted-2">${formatBytes(blob.size)} · 无法预览，请下载</span>
+        <a class="btn btn--primary btn--sm viewer-fallback-dl" download="${escapeHtml(name)}"
+           href="${URL.createObjectURL(blob)}">下载文件</a>
       </div>`;
   }
 
   renderActions(actions);
+}
+
+/**
+ * 多文件分享：正文在上，文件清单在下。
+ *
+ * 一次发布可能同时带文本和若干文件。文本照常按识别结果渲染，
+ * 文件给一行一个：能内联预览的（图片 / PDF / 文本）给「预览」，
+ * 其余直接下载。全部文件打包下载作为主操作。
+ */
+async function renderBundle() {
+  const host = $('#viewer');
+  const text = content.text || '';
+  const files = content.files || [];
+  let textHtml = '';
+
+  if (text.trim()) {
+    try {
+      const rendered = await api('/api/inspect', {
+        method: 'POST',
+        body: JSON.stringify({ text: text.slice(0, 200 * 1024), render: true })
+      });
+      textHtml = rendered.html;
+    } catch {
+      textHtml = `<pre class="plain">${escapeHtml(text)}</pre>`;
+    }
+  }
+
+  const rows = files
+    .map((item, index) => {
+      const name = item.file_name;
+      const canPreview =
+        isImage(name, item.content_type) ||
+        isPdf(name, item.content_type) ||
+        isProbablyText(name, item.content_type);
+      return `
+      <li class="bundle-item">
+        <span class="bundle-icon">${icon(
+          isImage(name, item.content_type) ? 'image' : 'file'
+        )}</span>
+        <span class="bundle-name truncate">${escapeHtml(name)}</span>
+        <span class="bundle-size muted-2">${formatBytes(item.size)}</span>
+        <span class="bundle-ops">
+          ${
+            canPreview
+              ? `<button class="btn btn--ghost btn--sm" data-preview="${index}" type="button">预览</button>`
+              : ''
+          }
+          <button class="btn btn--ghost btn--sm" data-file="${index}" type="button">下载</button>
+        </span>
+      </li>`;
+    })
+    .join('');
+
+  host.innerHTML = `
+    ${textHtml}
+    <div class="bundle">
+      <div class="bundle-head">
+        <span>${files.length} 个文件</span>
+        <span class="muted-2">共 ${formatBytes(
+          files.reduce((sum, item) => sum + (item.size || 0), 0)
+        )}</span>
+      </div>
+      <ul class="bundle-list">${rows}</ul>
+      <div class="bundle-preview hidden" id="bundlePreview"></div>
+    </div>`;
+
+  const actions = [{ kind: 'download-bundle' }];
+  if (text.trim()) actions.unshift({ kind: 'copy', text });
+  renderActions(actions);
+
+  host.querySelectorAll('[data-file]').forEach((button) => {
+    button.addEventListener('click', () =>
+      downloadBundleFile(Number(button.dataset.file))
+    );
+  });
+  host.querySelectorAll('[data-preview]').forEach((button) => {
+    button.addEventListener('click', () =>
+      previewBundleFile(Number(button.dataset.preview))
+    );
+  });
+}
+
+/** 打包下载：服务端把这份分享里的所有文件压成一个 zip 流回来。 */
+function downloadAll() {
+  const url =
+    resolveUrl(`/api/shares/${shareId}/download`) +
+    `?claim_token=${encodeURIComponent(claimToken)}`;
+  // 用隐藏 iframe 触发下载，避免把当前页面导航走
+  const frame = document.createElement('iframe');
+  frame.style.display = 'none';
+  frame.src = url;
+  document.body.appendChild(frame);
+  setTimeout(() => frame.remove(), 60000);
+  toast('开始下载压缩包', 'ok');
+}
+
+async function fetchBundleFile(idx) {
+  const url = resolveUrl(`/api/shares/${shareId}/file/${idx}`) +
+    `?claim_token=${encodeURIComponent(claimToken)}`;
+  const res = await fetch(url, { credentials: 'same-origin' });
+  if (!res.ok) throw new Error('文件已不可用');
+  return res.blob();
+}
+
+async function downloadBundleFile(idx) {
+  try {
+    const item = (content.files || [])[idx];
+    const blob = await fetchBundleFile(idx);
+    downloadSpec(blob, item ? item.file_name : `file-${idx + 1}`);
+  } catch (error) {
+    toast(error.message || '下载失败', 'err');
+  }
+}
+
+async function previewBundleFile(idx) {
+  const item = (content.files || [])[idx];
+  const box = $('#bundlePreview');
+  if (!item || !box) return;
+  box.classList.remove('hidden');
+  box.innerHTML = '<div class="viewer-loading">读取中…</div>';
+  try {
+    const blob = await fetchBundleFile(idx);
+    const name = item.file_name;
+    const type = item.content_type || blob.type;
+    if (isImage(name, type)) {
+      box.innerHTML = `<img src="${URL.createObjectURL(blob)}" alt="${escapeHtml(name)}" />`;
+    } else if (isPdf(name, type)) {
+      box.innerHTML = `<iframe src="${URL.createObjectURL(blob)}" title="PDF"></iframe>`;
+    } else {
+      const text = await blob.text();
+      try {
+        const rendered = await api('/api/inspect', {
+          method: 'POST',
+          body: JSON.stringify({
+            text: text.slice(0, 200 * 1024),
+            render: true,
+            filename: name
+          })
+        });
+        box.innerHTML = rendered.html;
+      } catch {
+        box.innerHTML = `<pre class="plain">${escapeHtml(text)}</pre>`;
+      }
+    }
+    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (error) {
+    box.innerHTML = `<div class="field-note">${escapeHtml(
+      error.message || '预览失败'
+    )}</div>`;
+  }
 }
 
 /**
@@ -248,7 +412,12 @@ function renderActions(specs) {
   const bar = $('#viewerFoot');
   bar.innerHTML = '';
   for (const spec of specs) {
-    const label = spec.kind === 'copy' ? '复制' : '下载';
+    const label =
+      spec.kind === 'copy'
+        ? '复制'
+        : spec.kind === 'download-bundle'
+          ? '全部下载'
+          : '下载';
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'rail-btn';
@@ -257,6 +426,7 @@ function renderActions(specs) {
     button.innerHTML = `${icon(spec.kind === 'copy' ? 'copy' : 'download')}<span>${label}</span>`;
     button.addEventListener('click', () => {
       if (spec.kind === 'copy') copySpec(spec.text);
+      else if (spec.kind === 'download-bundle') downloadAll();
       else downloadSpec(spec.blob, spec.name);
     });
     bar.appendChild(button);

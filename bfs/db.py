@@ -45,10 +45,37 @@ CREATE TABLE IF NOT EXISTS shares (
     -- 「关闭才销毁」用的两阶段：打开时只占位，关闭时才真正扣次数 + 删盘
     claim_token       TEXT,                -- 谁正在看这份内容
     claim_expires_at  INTEGER,             -- 占位超时：超时就当作已消费（防止只开不关）
-    owner_id          TEXT                -- 登录用户 subject；CI 用 shared
+    owner_id          TEXT,               -- 登录用户 subject；CI 用 shared
+    -- 这次分享里有几个文件（明细在 share_files）。0 = 纯文本分享。
+    -- 冗余这一列是为了列表页不必 JOIN 就能显示「3 个文件」。
+    file_count        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_shares_expires ON shares (expires_at);
+
+-- 一次发布里的多个文件。
+--
+-- 为什么单开一张表而不是「一个分享一个文件」：
+-- 用户按 Ctrl+V 粘一段代码 + 拖两个文件，这在语义上是**一次分享**，
+-- 应该是同一条链接、同一个提取码、同一次焚毁。旧实现是每个文件建一条
+-- 分享，于是发一次东西会得到 N 条消息 —— 那不对。
+--
+-- shares 行仍是唯一的「分享」，`file_count` 冗余记录数量方便列表展示；
+-- 单个文件的元信息（名称/大小/摘要）落在本表。
+CREATE TABLE IF NOT EXISTS share_files (
+    share_id     TEXT NOT NULL REFERENCES shares (id) ON DELETE CASCADE,
+    idx          INTEGER NOT NULL,      -- 展示顺序，从 0 开始
+    file_name    TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    size         INTEGER NOT NULL,
+    sha256       TEXT NOT NULL,
+    md5          TEXT NOT NULL,
+    crc32        TEXT NOT NULL,
+    blob         TEXT NOT NULL,         -- 相对 data_dir
+    detected_kind TEXT,                 -- 文本类文件的识别结果（可用于预览）
+    language     TEXT,
+    PRIMARY KEY (share_id, idx)
+);
 
 CREATE TABLE IF NOT EXISTS ota_tokens (
     token        TEXT PRIMARY KEY,
@@ -139,6 +166,7 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("claim_token", "TEXT"),
         ("claim_expires_at", "INTEGER"),
         ("owner_id", "TEXT"),
+        ("file_count", "INTEGER NOT NULL DEFAULT 0"),
     ],
 }
 
