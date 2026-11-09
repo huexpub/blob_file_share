@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>分享历史 · BFS</title>
+    <link rel="icon" type="image/svg+xml" href="__BASE__/favicon.svg" />
+    <link rel="stylesheet" href="__BASE__/static/style.css" />
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('bfs.theme');
+          document.documentElement.dataset.theme =
+            saved === 'light' || saved === 'dark' ? saved : 'dark';
+        } catch (e) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar"></header>
+
+      <main class="main is-wide">
+        <div class="page-head page-head--row">
+          <div>
+            <h1>分享历史</h1>
+            <p class="muted-2" id="historyIntro">当前账户名下的全部分享</p>
+          </div>
+          <button class="btn btn--ghost btn--sm" id="refreshBtn" type="button">刷新</button>
+        </div>
+
+        <div id="gateHint" class="banner banner--warn hidden">
+          这个部署没有启用 OAuth 登录，历史只存在浏览器本地。
+          <a href="__BASE__/">回到上传页</a>
+        </div>
+
+        <div class="card">
+          <div class="table-scroll">
+            <table class="data-table history-table" id="historyTable">
+              <thead>
+                <tr>
+                  <th class="col-name">名称</th>
+                  <th class="col-kind">形态</th>
+                  <th class="col-size">大小</th>
+                  <th class="col-state">状态</th>
+                  <th class="col-time">创建时间</th>
+                  <th class="col-expire">有效期</th>
+                  <th class="col-ops">操作</th>
+                </tr>
+              </thead>
+              <tbody id="historyBody">
+                <tr><td colspan="7" class="table-empty">加载中…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="page-foot-row">
+          <span class="field-note" id="historyFootNote"></span>
+          <button class="btn btn--ghost btn--sm hidden" id="clearAll" type="button">清空并焚毁</button>
+        </div>
+      </main>
+
+      <footer class="foot">
+        <span>__FOOTER__</span>
+      </footer>
+    </div>
+
+    <script type="module" src="__BASE__/static/history.js"></script>
+  </body>
+</html>

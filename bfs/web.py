@@ -75,6 +75,10 @@ def _page(name: str, settings) -> HTMLResponse:
         f"window.__BFS_GATE__={json.dumps(boot['gate'])};</script>"
     )
     html = html.replace("__BASE__", base)
+    # 页脚由服务端注入：备案号这类信息属于部署配置，不该硬编码在 5 个 HTML 里。
+    # 内容来自 BFS_FOOTER_HTML，允许 HTML（要放 <a href>），所以这里不加转义 ——
+    # 它是运维自己写的配置，不是用户输入。
+    html = html.replace("__FOOTER__", settings.footer)
     # 注入必须在加载 app.js 之前：app.js 里算 API 地址时就用了
     html = html.replace('<link rel="stylesheet"', f'{inject}\n    <link rel="stylesheet"', 1)
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
@@ -101,6 +105,14 @@ def build_web_router(settings) -> APIRouter:
     @router.get(settings.login_path, include_in_schema=False)
     def login() -> HTMLResponse:
         return _page("login.html", settings)
+
+    @router.get(f"{prefix}/history" if prefix else "/history", include_in_schema=False)
+    def history_page() -> HTMLResponse:
+        return _page("history.html", settings)
+
+    @router.get(f"{prefix}/settings" if prefix else "/settings", include_in_schema=False)
+    def settings_page() -> HTMLResponse:
+        return _page("settings.html", settings)
 
     @router.get(f"{share_prefix}/{{share_id}}", include_in_schema=False)
     def share_page(share_id: str) -> HTMLResponse:

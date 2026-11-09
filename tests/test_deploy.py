@@ -255,3 +255,47 @@ def test_share_page_footer_is_inside_shell(tmp_path):
     assert _footer_is_inside_shell(page)
     # 页脚只能出现一次：曾经 share.html 里同时有正确的和外部的各一份
     assert page.count('class="foot"') == 1
+
+
+# ---------------------------------------------------------------- 页脚自定义
+#
+# 备案号这类信息属于部署配置，不该硬编码在 5 个 HTML 里。
+# 由 BFS_FOOTER_HTML 注入，允许 HTML（要放 <a href>）。
+
+BEIAN = (
+    '<a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">'
+    "\u7ca4ICP\u590712345678\u53f7-1</a>"
+)
+
+
+def test_footer_defaults_when_unset(tmp_path):
+    from fastapi.testclient import TestClient
+
+    with TestClient(create_app(make_settings(tmp_path))) as client:
+        page = client.get("/").text
+    assert "BLOB FILE SHARING @ 2026" in page
+    assert "__FOOTER__" not in page
+
+
+def test_footer_html_is_injected_on_every_page(tmp_path):
+    from fastapi.testclient import TestClient
+
+    with TestClient(create_app(make_settings(tmp_path, footer_html=BEIAN))) as client:
+        created = client.post("/api/shares", json={"text": "x", "kind": "text"}).json()
+        paths = ["/", "/login", "/history", "/settings", f"/s/{created['id']}"]
+        for path in paths:
+            page = client.get(path).text
+            assert "beian.miit.gov.cn" in page, path
+            assert "__FOOTER__" not in page, path
+            # 默认文案被替换掉，不是叠加
+            assert "BLOB FILE SHARING @ 2026" not in page, path
+
+
+def test_footer_link_is_not_escaped(tmp_path):
+    """备案号要能点：注入的 <a> 必须原样输出，不能被转义成文本。"""
+    from fastapi.testclient import TestClient
+
+    with TestClient(create_app(make_settings(tmp_path, footer_html=BEIAN))) as client:
+        page = client.get("/").text
+    assert "<a href=\"https://beian.miit.gov.cn/\"" in page
+    assert "&lt;a href" not in page

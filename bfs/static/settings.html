@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>设置 · BFS</title>
+    <link rel="icon" type="image/svg+xml" href="__BASE__/favicon.svg" />
+    <link rel="stylesheet" href="__BASE__/static/style.css" />
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem('bfs.theme');
+          document.documentElement.dataset.theme =
+            saved === 'light' || saved === 'dark' ? saved : 'dark';
+        } catch (e) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar"></header>
+
+      <main class="main">
+        <div class="page-head">
+          <h1>设置</h1>
+          <p class="muted-2" id="settingsIntro">账户与集成</p>
+        </div>
+
+        <div id="gateHint" class="banner banner--warn hidden">
+          这个部署没有启用 OAuth 登录，没有账户概念，因此不存在 CI token。
+        </div>
+
+        <section class="card settings-card hidden" id="tokenCard">
+          <div class="card-head">
+            <span>CI Token</span>
+            <span class="hint" id="tokenQuota"></span>
+          </div>
+          <div class="card-body settings-body">
+            <p class="field-note">
+              给流水线用。调用 <code>POST /api/shares/batch</code> 时带上
+              <code>Authorization: Bearer &lt;token&gt;</code>，
+              上传的内容会记在当前账户的历史里。
+            </p>
+
+            <div class="token-new hidden" id="tokenNew">
+              <div class="copy-row">
+                <input class="input mono" id="tokenValue" readonly />
+                <button class="btn btn--primary btn--sm" id="tokenCopy" type="button">复制</button>
+              </div>
+              <div class="banner banner--warn">明文只显示这一次，关闭后无法再次查看。</div>
+            </div>
+
+            <div class="token-create">
+              <input class="input" id="tokenLabel" placeholder="备注，如 ci-firmware" maxlength="64" />
+              <button class="btn btn--primary btn--sm" id="tokenCreate" type="button">新建</button>
+            </div>
+
+            <div class="table-scroll">
+              <table class="data-table token-table">
+                <thead>
+                  <tr>
+                    <th>备注</th>
+                    <th>创建时间</th>
+                    <th>最近使用</th>
+                    <th class="col-ops">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="tokenBody">
+                  <tr><td colspan="4" class="table-empty">加载中…</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <details class="settings-help">
+              <summary>怎么在 Gitea / GitHub Actions 里用</summary>
+              <pre class="settings-code"><code>curl -X POST https://bfs.example.com/api/shares/batch \
+  -H "Authorization: Bearer $BFS_TOKEN" \
+  -F "file=@firmware.bin" \
+  -F "file=@symbols.zip"</code></pre>
+              <p class="field-note">
+                响应里的 <code>message</code> 是可直接转发的文案，把 token 放进仓库 secret 即可。
+              </p>
+            </details>
+          </div>
+        </section>
+
+        <section class="card settings-card" id="accountCard">
+          <div class="card-head"><span>账户</span></div>
+          <div class="card-body settings-body">
+            <dl class="settings-kv">
+              <dt>当前身份</dt><dd id="accountName">—</dd>
+              <dt>登录方式</dt><dd id="accountMethods">—</dd>
+              <dt>对外地址</dt><dd class="mono" id="accountBase">—</dd>
+            </dl>
+            <div class="btn-row">
+              <a class="btn btn--ghost btn--sm" href="__BASE__/history">查看历史</a>
+              <button class="btn btn--ghost btn--sm btn--danger" id="logoutBtn" type="button">退出登录</button>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="foot">
+        <span>__FOOTER__</span>
+      </footer>
+    </div>
+
+    <script type="module" src="__BASE__/static/settings.js"></script>
+  </body>
+</html>

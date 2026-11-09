@@ -102,6 +102,8 @@ const ICONS = {
     '<path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
   lock:
     '<rect x="4.5" y="10.5" width="15" height="10" rx="1" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/>',
+  settings:
+    '<circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
   logout:
     '<path d="M15 17v1a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M11 12h9m0 0-3-3m3 3-3 3" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
   github:
@@ -438,7 +440,7 @@ export function downloadBlob(blob, fileName) {
 }
 
 /** 顶栏（两个页面共用）。 */
-export function mountTopbar({ subtitle, backHref, home = true, history = false, minimal = false } = {}) {
+export function mountTopbar({ subtitle, backHref, home = true, history = false, minimal = false, nav = false } = {}) {
   const bar = document.querySelector('.topbar');
   if (!bar) return;
   const themeName = document.documentElement.dataset.theme;
@@ -471,6 +473,16 @@ export function mountTopbar({ subtitle, backHref, home = true, history = false, 
          ${icon('logout')}
        </button>`
     : '';
+  // nav：管理模式下顶栏给出「历史 / 设置」两个独立页面入口。
+  // 不再把 CI token 塞进历史抽屉 —— 那是两件事，混在一起既难找也不好扩展。
+  const navSlot = nav
+    ? `<a class="btn btn--ghost btn--sm" href="${escapeHtml(sitePath('/history'))}" title="分享历史">
+         ${icon('history')}<span class="btn-label">历史</span>
+       </a>
+       <a class="btn btn--ghost btn--sm" href="${escapeHtml(sitePath('/settings'))}" title="设置">
+         ${icon('settings')}<span class="btn-label">设置</span>
+       </a>`
+    : '';
   bar.innerHTML = `
     ${
       backHref
@@ -493,6 +505,7 @@ export function mountTopbar({ subtitle, backHref, home = true, history = false, 
             </button>`
           : ''
       }
+      ${navSlot}
       <button class="btn btn--ghost btn--sm btn--icon" id="themeToggle" title="切换配色">
         ${icon(themeName === 'dark' ? 'sun' : 'moon')}
       </button>

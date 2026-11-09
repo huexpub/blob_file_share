@@ -23,9 +23,6 @@
       <header class="topbar"></header>
 
       <main class="main is-wide">
-        <div id="managedBanner" class="banner banner--ok hidden">
-          管理式分享已启用 · 分享历史保存在当前账户中
-        </div>
         <div class="page-head">
           <h1>粘什么传什么</h1>
           <p>
@@ -103,58 +100,8 @@
       </main>
 
       <footer class="foot">
-        <span>BLOB FILE SHARING @ 2026</span>
+        <span>__FOOTER__</span>
       </footer>
-    </div>
-
-    <!-- 发送历史抽屉：从右侧滑出，不占首页版面 -->
-    <div class="history-drawer-mask hidden" id="historyMask"></div>
-    <aside class="history-drawer" id="historyDrawer" aria-label="发送历史">
-      <div class="send-history">
-        <div class="send-history-head">
-          <span>发送历史</span>
-          <span class="hint" id="historyCount"></span>
-          <button class="btn btn--ghost btn--sm btn--icon" id="historyClose" title="关闭">×</button>
-        </div>
-        <div class="send-history-list" id="historyList"></div>
-        <div class="send-history-foot">
-          <span class="field-note" id="historyNote">只记录本机发出的链接，不存内容正文。</span>
-          <button class="btn btn--ghost btn--sm hidden" id="tokensBtn" type="button">CI Token</button>
-          <button class="btn btn--ghost btn--sm hidden" id="historyClear" type="button">清空并焚毁</button>
-        </div>
-      </div>
-    </aside>
-
-    <!-- CI token 管理：只有 OAuth 模式才看得到这个入口 -->
-    <div class="modal-mask hidden" id="tokensMask">
-      <div class="modal modal--tokens" role="dialog" aria-modal="true" aria-labelledby="tokensTitle">
-        <div class="modal-head">
-          <span id="tokensTitle">CI Token</span>
-          <button class="btn btn--ghost btn--sm btn--icon" id="tokensClose" title="关闭">×</button>
-        </div>
-        <div class="modal-body">
-          <p class="field-note">
-            给流水线用。用 <code>Authorization: Bearer &lt;token&gt;</code> 调
-            <code>POST /api/shares/batch</code> 上传，内容会记在你的历史里。
-            明文只显示这一次。
-          </p>
-
-          <div class="token-new hidden" id="tokenNew">
-            <div class="copy-row">
-              <input class="input mono" id="tokenValue" readonly />
-              <button class="btn btn--primary btn--sm" id="tokenCopy" type="button">复制</button>
-            </div>
-            <div class="banner banner--warn">关闭后无法再次查看，请现在保存。</div>
-          </div>
-
-          <div class="token-create">
-            <input class="input" id="tokenLabel" placeholder="备注，如 ci-firmware" maxlength="64" />
-            <button class="btn btn--primary btn--sm" id="tokenCreate" type="button">新建</button>
-          </div>
-
-          <div class="token-list" id="tokenList"></div>
-        </div>
-      </div>
     </div>
 
     <div class="modal-mask hidden" id="optionsMask">

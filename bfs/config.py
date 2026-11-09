@@ -75,6 +75,9 @@ class Settings:
     auto_extract_code: bool = True
     #: 是否记录审计事件
     audit: bool = True
+    #: 页脚文字（支持 HTML 片段，可写 <a href="...">备案号</a>）。
+    #: 留空 = 用内置的默认文案。
+    footer_html: str = ""
 
     # ---- 管理员闸门 ----
     #: 管理员密码。设了才开启登录（写入口需要登录，读入口始终公开）。
@@ -94,6 +97,15 @@ class Settings:
     gitea_client_secret: str = ""
     #: CI 分享的默认有效期（小时）；0 = 永久。网页默认设置不受影响。
     api_default_ttl_hours: int = 0
+    #: 页脚内容（允许 HTML，用于备案号等带链接的文案）。留空 = 内置默认。
+    footer_html: str = ""
+
+    @property
+    def footer(self) -> str:
+        """页脚最终内容。默认只有一行版权，可由 BFS_FOOTER_HTML 覆盖。"""
+        if self.footer_html.strip():
+            return self.footer_html.strip()
+        return "BLOB FILE SHARING @ 2026"
 
     @property
     def db_path(self) -> Path:
@@ -150,6 +162,7 @@ class Settings:
             gitea_client_id=_env("GITEA_CLIENT_ID") or "",
             gitea_client_secret=_env("GITEA_CLIENT_SECRET") or "",
             api_default_ttl_hours=_int("API_DEFAULT_TTL_HOURS", 0),
+            footer_html=_env("FOOTER_HTML") or "",
         )
 
     def public_url(self, base: str, share_id: str) -> str:

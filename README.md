@@ -118,6 +118,15 @@ https://<你的域名>/bfs/api/auth/github/callback     # 挂了前缀 BFS_PATH_
 https://<你的域名>/api/auth/github/callback         # 根部署
 ```
 
+Gitea 类似，把 `github` 换成 `gitea`：
+
+```
+https://<你的域名>/bfs/api/auth/gitea/callback
+```
+
+这些值统一写在 `.env` 里（`cp .env.example .env` 后填），不要改 `docker-compose.yml` ——
+`.env` 已被 `.gitignore` 忽略，改 compose 会把密钥提交上去。
+
 要让 OAuth 走对外域名而不是内网地址，同时设好 `BFS_BASE_URL`。
 
 **闸门只锁写入口** —— 建分享、查历史、焚毁、OTA 直链需要登录；
@@ -173,6 +182,32 @@ curl -X POST https://<域名>/bfs/api/shares/batch \
 
 用 token 上传的内容归属 token 的所有者，所以会出现在本人的历史里，
 和网页端分享一起管理、一起焚毁。撤销 token 后流水线立即失败。
+
+### 文件存在哪
+
+分享的文件**直接落在磁盘上**（不是内存），路径是 `BFS_DATA_DIR/blobs/<前两位>/<id>`：
+
+```bash
+docker compose exec bfs ls -R /app/data/blobs | head
+```
+
+compose 里把宿主目录挂到 `/app/data`，所以你的文件实际在 `/opt/bfs/blobs/`。
+分享被焚毁、次数用尽、过期或手动删除时，对应文件立即 `unlink`，
+数据库只留一条墓碑记录（时间、大小、sha256，正文已清空）。
+
+文本分享的正文存在 SQLite（`text_content`），因为要参与识别与渲染；
+它同样在焚毁时被置为 NULL。
+
+### 页脚（备案号）
+
+`BFS_FOOTER_HTML` 支持 HTML，用来放备案号这类带链接的信息：
+
+```bash
+BFS_FOOTER_HTML=<a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">粤ICP备00000000号-1</a> · BFS
+```
+
+留空则显示内置的 `BLOB FILE SHARING @ 2026`。
+内容由服务端注入所有页面（首页 / 分享页 / 登录 / 历史 / 设置），不写死在 HTML 里。
 
 ## 常用命令
 

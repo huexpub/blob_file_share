@@ -10,6 +10,12 @@
       BFS_PORT: 8000
       BFS_DATA_DIR: /app/data
       # 反代场景填对外域名，复制出去的链接才是对的
+      #
+      # 注意 `${VAR:-}` 由 compose 解析时替换，取值来源是「shell 环境变量 +
+      # **compose 文件同目录**下的 .env」。如果你在 compose 里另写了
+      # `env_file: /opt/xxx/.env`，那个文件**不参与**这里替换 ——
+      # 于是 `${VAR:-}` 变成空串，并把 env_file 送进来的值覆盖掉。
+      # 所以：凡是在 env_file 里出现的变量，这里不要再重复声明。
       BFS_BASE_URL: ${BFS_BASE_URL:-}
       # 管理员闸门：设了才需要登录（只锁写入口，接收方永远公开）。
       # 留空 = 谁都能建分享（仅适合本地/内网）。详见 README。
@@ -25,6 +31,8 @@
       BFS_GITEA_CLIENT_SECRET: ${BFS_GITEA_CLIENT_SECRET:-}
       # CI 上传的默认有效期（小时）；0 = 永久
       BFS_API_DEFAULT_TTL_HOURS: ${BFS_API_DEFAULT_TTL_HOURS:-0}
+      # 页脚内容（支持 HTML，用于备案号等）。留空 = 内置版权行
+      BFS_FOOTER_HTML: ${BFS_FOOTER_HTML:-}
       # 挂载前缀：留空 = 根；填 bfs = 整个服务住进 /bfs（页面/API/链接都在里面）
       BFS_PATH_PREFIX: ${BFS_PATH_PREFIX:-}
       # 分享段：留空 = 跟前缀走（/bfs/<id>）；填 s 则用 /bfs/s/<id>

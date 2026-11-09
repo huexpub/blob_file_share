@@ -2497,3 +2497,166 @@ body.drawer-open .main {
 #logoutBtn:hover {
   color: var(--wk-text-strong);
 }
+
+/* ================================================================
+ * 独立页面：历史表格 / 设置
+ *
+ * 这两个页面取代了原来的右侧抽屉。抽屉适合「随手看一眼」，
+ * 但登录之后历史会长到几十上百条，需要表格才能一眼扫完状态。
+ * ================================================================ */
+
+.page-head--row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.page-foot-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.page-foot-row .field-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--wk-muted-2);
+}
+
+/* ---------- 历史表格 ---------- */
+
+.history-table td {
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.history-table .col-name {
+  min-width: 220px;
+  max-width: 340px;
+  white-space: normal;
+}
+
+.history-table .col-ops {
+  width: 1%;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.history-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.cell-strong {
+  display: block;
+  font-weight: 600;
+  color: var(--wk-text-strong);
+}
+
+.cell-sub {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--wk-muted-2);
+}
+
+.table-empty {
+  padding: 28px 12px;
+  text-align: center;
+  color: var(--wk-muted-2);
+  font-size: 12.5px;
+  white-space: normal;
+}
+
+/* 表格里的图标按钮不需要额外留白 */
+.history-table .btn--icon,
+.token-table .btn--icon {
+  width: 26px;
+  height: 26px;
+}
+
+.history-table [aria-disabled='true'] {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+/* ---------- 设置页 ---------- */
+
+.settings-card {
+  margin-bottom: 16px;
+}
+
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-kv {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.settings-kv dt {
+  color: var(--wk-muted-2);
+}
+
+.settings-kv dd {
+  margin: 0;
+  color: var(--wk-text);
+  overflow-wrap: anywhere;
+}
+
+.token-table td {
+  white-space: nowrap;
+}
+
+.token-table .col-ops {
+  width: 1%;
+  text-align: right;
+}
+
+.settings-help {
+  border-top: 1px solid var(--wk-border-soft);
+  padding-top: 10px;
+  font-size: 12px;
+}
+
+.settings-help summary {
+  cursor: pointer;
+  color: var(--wk-text-strong);
+  font-weight: 550;
+}
+
+.settings-code {
+  margin: 8px 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  background: var(--wk-bg-alt);
+  border: 1px solid var(--wk-border-soft);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+@media (max-width: 760px) {
+  /* 窄屏把表格收成两列：名称 + 状态，其余信息折叠进名称下方 */
+  .history-table .col-kind,
+  .history-table .col-size,
+  .history-table .col-time {
+    display: none;
+  }
+
+  .settings-kv {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .settings-kv dd {
+    margin-bottom: 8px;
+  }
+}

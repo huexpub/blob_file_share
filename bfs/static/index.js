@@ -33,7 +33,7 @@ import {
 } from './app.js';
 
 initTheme();
-mountTopbar({ subtitle: '快传', history: true });
+mountTopbar({ subtitle: '快传', nav: true });
 
 // 开了闸门但没登录：直接带去登录页，别让用户先看到上传界面再被 401 打回来
 if (BOOT.gate) {
@@ -124,73 +124,6 @@ function remember(share) {
   renderHistory();
 }
 
-/* ---------------------------------------------------------------- 抽屉开关 */
-
-function openHistory() {
-  $('#historyDrawer').classList.add('is-open');
-  $('#historyMask').classList.remove('hidden');
-  document.body.classList.add('drawer-open');
-  renderHistory();
-  refreshStatuses();
-}
-
-function closeHistory() {
-  $('#historyDrawer').classList.remove('is-open');
-  $('#historyMask').classList.add('hidden');
-  document.body.classList.remove('drawer-open');
-}
-
-function toggleHistory() {
-  if ($('#historyDrawer').classList.contains('is-open')) closeHistory();
-  else openHistory();
-}
-
-$('#historyMask').addEventListener('click', closeHistory);
-$('#historyClose').addEventListener('click', closeHistory);
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closeHistory();
-});
-const historyToggle = document.querySelector('#historyToggle');
-if (historyToggle) historyToggle.addEventListener('click', toggleHistory);
-
-$('#historyClear').addEventListener('click', async () => {
-  if (managedHistory) {
-    if (!history.length) return;
-    if (!window.confirm('清空历史会焚毁当前账户名下的所有分享，且无法恢复。确定吗？')) return;
-    try {
-      const result = await api('/api/shares/mine', { method: 'DELETE' });
-      await refreshManagedHistory();
-      toast(`已焚毁 ${result.burned} 条分享`, 'ok');
-    } catch (error) {
-      toast(error.message || '清空失败', 'err');
-    }
-    return;
-  }
-  if (!history.length) return;
-  if (!window.confirm('清空本机的发送记录？（不会焚毁已发出的内容）')) return;
-  history = [];
-  saveHistory();
-  renderHistory();
-  toast('已清空发送记录', 'ok');
-});
-
-function patchHistory(items) {
-  let changed = false;
-  for (const update of items) {
-    const entry = history.find((item) => item.id === update.id);
-    if (!entry) continue;
-    const before = `${entry.state}/${entry.readCount}`;
-    entry.state = update.state;
-    entry.readCount = update.read_count;
-    entry.remaining = update.remaining;
-    if (`${entry.state}/${entry.readCount}` !== before) changed = true;
-  }
-  if (changed) {
-    saveHistory();
-    renderHistory();
-  }
-}
-
 /* ---------------------------------------------------------------- 历史渲染 */
 
 function remainingOf(entry) {
@@ -211,74 +144,15 @@ function stateBadge(entry) {
 }
 
 function renderHistory() {
-  const list = $('#historyList');
+  // 历史已经是独立页面（/history），这里不再渲染列表，
+  // 只维护顶栏「历史」入口上的未读角标。
   const badge = document.querySelector('#historyBadge');
-  $('#historyCount').textContent = history.length ? `${history.length} 条` : '';
-  $('#historyNote').textContent = managedHistory
-    ? '管理式分享 · 删除历史会立即焚毁对应内容。'
-    : '只记录本机发出的链接，不存内容正文。';
-  $('#historyClear').textContent = managedHistory ? '清空并焚毁' : '清空记录';
-  $('#historyClear').classList.toggle('hidden', !managedHistory);
-  if (badge) {
-    // 顶栏只提示「有还没被读的」，不暴露条数细节
-    const pending = history.filter(
-      (entry) => entry.state === 'active' && !entry.readCount
-    ).length;
-    badge.textContent = String(pending);
-    badge.classList.toggle('hidden', pending === 0);
-  }
-  if (!history.length) {
-    list.innerHTML = `
-      <div class="history-empty">
-        ${icon('link')}
-        <span>还没有发过东西</span>
-      </div>`;
-    window.clearInterval(pollTimer);
-    return;
-  }
-  list.innerHTML = history
-    .map((entry) => {
-      const path = entry.url.replace(/^https?:\/\/[^/]+/, '');
-      const sub = [entry.label, entry.language, formatBytes(entry.size)].filter(Boolean).join(' · ');
-      return `
-      <div class="history-record">
-        <button class="history-item" data-id="${escapeHtml(entry.id)}" type="button">
-          <div class="history-item-top">
-            <span class="truncate">${escapeHtml(entry.fileName || entry.label || '分享')}</span>
-            ${stateBadge(entry)}
-          </div>
-          <div class="history-item-sub truncate">${escapeHtml(sub)}</div>
-          <div class="history-item-foot">
-            <span class="mono truncate">${escapeHtml(path)}</span>
-            <span class="muted-2">${formatTime((entry.createdAt || 0) / 1000)}</span>
-          </div>
-        </button>
-        ${managedHistory ? `<button class="history-burn" data-burn="${escapeHtml(entry.id)}" type="button" title="焚毁并删除" aria-label="焚毁并删除">${icon('fire')}</button>` : ''}
-      </div>`;
-    })
-    .join('');
-  list.querySelectorAll('[data-id]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const entry = history.find((item) => item.id === button.dataset.id);
-      if (entry) reopen(entry);
-    });
-  });
-  list.querySelectorAll('[data-burn]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const entry = history.find((item) => item.id === button.dataset.burn);
-      if (!entry || !window.confirm('焚毁后内容立即删除且无法恢复，确定吗？')) return;
-      button.disabled = true;
-      try {
-        await api(`/api/shares/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
-        await refreshManagedHistory();
-        toast('已焚毁', 'ok');
-      } catch (error) {
-        button.disabled = false;
-        toast(error.message || '焚毁失败', 'err');
-      }
-    });
-  });
-  if (history.some((entry) => entry.state === 'active')) scheduleStatusPoll();
+  if (!badge) return;
+  const pending = history.filter(
+    (entry) => entry.state === 'active' && !entry.readCount
+  ).length;
+  badge.textContent = String(pending);
+  badge.classList.toggle('hidden', pending === 0);
 }
 
 let pollTimer = 0;
@@ -316,107 +190,15 @@ async function refreshManagedHistory() {
 async function initHistoryMode() {
   if (!BOOT.gate) return;
   const info = await authSession();
-  // 只有 OAuth 模式才有「账户」这回事：历史入库、可建 CI token
+  // 只有 OAuth 模式才有「账户」这回事，历史才存服务端。
+  // 顶栏的「历史 / 设置」是独立页面，这里只决定本地还记不记。
   managedHistory = Boolean(info.methods?.oauth && info.authenticated);
   if (!managedHistory) return;
-  $('#managedBanner').classList.remove('hidden');
-  $('#tokensBtn').classList.remove('hidden');
   history = [];
-  $('#historyClear').classList.remove('hidden');
   await refreshManagedHistory();
 }
 
 initHistoryMode();
-
-/* ---------------------------------------------------------------- CI token */
-
-function openTokens() {
-  $('#tokensMask').classList.remove('hidden');
-  document.body.classList.add('modal-open');
-  $('#tokenNew').classList.add('hidden');
-  loadTokens();
-}
-
-function closeTokens() {
-  $('#tokensMask').classList.add('hidden');
-  document.body.classList.remove('modal-open');
-  // 关掉之后明文就再也不显示了：清空输入框，避免留在 DOM 里
-  $('#tokenValue').value = '';
-  $('#tokenNew').classList.add('hidden');
-}
-
-async function loadTokens() {
-  const list = $('#tokenList');
-  list.innerHTML = '<div class="field-note">加载中…</div>';
-  try {
-    const data = await api('/api/tokens');
-    const items = data.items || [];
-    if (!items.length) {
-      list.innerHTML = '<div class="field-note">还没有 token。</div>';
-      return;
-    }
-    list.innerHTML = items
-      .map(
-        (item) => `
-        <div class="token-item">
-          <div class="token-item-main">
-            <span class="truncate">${escapeHtml(item.label || '(无备注)')}</span>
-            <span class="muted-2">${formatTime(item.last_used_at)}</span>
-          </div>
-          <button class="btn btn--ghost btn--sm btn--danger" data-revoke="${escapeHtml(
-            item.label || ''
-          )}" type="button">撤销</button>
-        </div>`
-      )
-      .join('');
-    list.querySelectorAll('[data-revoke]').forEach((button) => {
-      button.addEventListener('click', async () => {
-        if (!window.confirm('撤销后使用该 token 的流水线会立即失败，确定吗？')) return;
-        try {
-          await api(`/api/tokens?label=${encodeURIComponent(button.dataset.revoke)}`, {
-            method: 'DELETE'
-          });
-          loadTokens();
-          toast('已撤销', 'ok');
-        } catch (error) {
-          toast(error.message || '撤销失败', 'err');
-        }
-      });
-    });
-  } catch (error) {
-    list.innerHTML = `<div class="field-note">${escapeHtml(error.message || '加载失败')}</div>`;
-  }
-}
-
-$('#tokensBtn').addEventListener('click', openTokens);
-$('#tokensClose').addEventListener('click', closeTokens);
-$('#tokensMask').addEventListener('click', (event) => {
-  if (event.target === $('#tokensMask')) closeTokens();
-});
-
-$('#tokenCreate').addEventListener('click', async () => {
-  const button = $('#tokenCreate');
-  button.disabled = true;
-  try {
-    const created = await api('/api/tokens', {
-      method: 'POST',
-      body: JSON.stringify({ label: $('#tokenLabel').value.trim() })
-    });
-    $('#tokenValue').value = created.token;
-    $('#tokenNew').classList.remove('hidden');
-    $('#tokenLabel').value = '';
-    loadTokens();
-  } catch (error) {
-    toast(error.message || '创建失败', 'err');
-  } finally {
-    button.disabled = false;
-  }
-});
-
-$('#tokenCopy').addEventListener('click', async () => {
-  const ok = await copyText($('#tokenValue').value);
-  toast(ok ? '已复制' : '复制失败，请手动选择', ok ? 'ok' : 'err');
-});
 
 function scheduleStatusPoll() {
   window.clearInterval(pollTimer);
