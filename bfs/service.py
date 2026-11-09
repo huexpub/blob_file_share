@@ -229,6 +229,7 @@ class Service:
         kind: str | None = None,
         ip: str | None = None,
         base_url: str = "",
+        owner_id: str | None = None,
     ) -> Created:
         payload = text.encode("utf-8")
         if not payload:
@@ -262,8 +263,8 @@ class Service:
                    (id, kind, file_name, content_type, size, sha256, md5, crc32, blob,
                     text_content, markdown, detected_kind, language, extract_hash,
                     extract_salt, manage_token, created_at, expires_at, max_reads,
-                    read_count)
-                   VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,0)""",
+                    read_count, owner_id)
+                   VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?,0,?)""",
                 (
                     share_id,
                     "text",
@@ -283,6 +284,7 @@ class Service:
                     _now(),
                     ttl,
                     reads,
+                    owner_id,
                 ),
             )
             self._audit(conn, "create_text", share_id, ip, f"{len(payload)}B {analysis.kind}")
@@ -303,6 +305,7 @@ class Service:
         no_code: bool = False,
         ip: str | None = None,
         base_url: str = "",
+        owner_id: str | None = None,
     ) -> Created:
         """流式写盘：边写边算摘要，不把整个文件读进内存。
 
@@ -363,8 +366,8 @@ class Service:
                        (id, kind, file_name, content_type, size, sha256, md5, crc32,
                         blob, text_content, markdown, detected_kind, language,
                         extract_hash, extract_salt, manage_token, created_at,
-                        expires_at, max_reads, read_count)
-                       VALUES (?,?,?,?,?,?,?,?,?,NULL,0,?,?,?,?,?,?,?,?,0)""",
+                        expires_at, max_reads, read_count, owner_id)
+                       VALUES (?,?,?,?,?,?,?,?,?,NULL,0,?,?,?,?,?,?,?,?,0,?)""",
                     (
                         share_id,
                         "file",
@@ -383,6 +386,7 @@ class Service:
                         _now(),
                         ttl,
                         reads,
+                        owner_id,
                     ),
                 )
                 self._audit(conn, "create_file", share_id, ip, f"{size}B {detected_kind or 'bin'}")

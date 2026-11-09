@@ -88,6 +88,12 @@ class Settings:
     github_client_secret: str = ""
     #: 允许登录的 GitHub 用户名（逗号分隔）。空 = 即便配了 OAuth 也不放人进。
     github_allowed_users: str = ""
+    #: Gitea OAuth：服务根 URL，如 https://git.example.com
+    gitea_url: str = ""
+    gitea_client_id: str = ""
+    gitea_client_secret: str = ""
+    #: CI 分享的默认有效期（小时）；0 = 永久。网页默认设置不受影响。
+    api_default_ttl_hours: int = 0
 
     @property
     def db_path(self) -> Path:
@@ -140,6 +146,10 @@ class Settings:
             github_client_id=_env("GITHUB_CLIENT_ID") or "",
             github_client_secret=_env("GITHUB_CLIENT_SECRET") or "",
             github_allowed_users=_env("GITHUB_ALLOWED_USERS") or "",
+            gitea_url=(_env("GITEA_URL") or "").rstrip("/"),
+            gitea_client_id=_env("GITEA_CLIENT_ID") or "",
+            gitea_client_secret=_env("GITEA_CLIENT_SECRET") or "",
+            api_default_ttl_hours=_int("API_DEFAULT_TTL_HOURS", 0),
         )
 
     def public_url(self, base: str, share_id: str) -> str:
@@ -205,9 +215,24 @@ class Settings:
         )
 
     @property
+    def gitea_ready(self) -> bool:
+        """Gitea OAuth 三项齐备才启用。"""
+        return bool(self.gitea_url and self.gitea_client_id and self.gitea_client_secret)
+
+    @property
     def gate_enabled(self) -> bool:
-        """有任意一种登录方式就开闸门；都没配就保持公开（本地开发不会被挡住）。"""
-        return bool(self.admin_password) or self.github_ready
+        """有任意一种登录方式就开闸门；都没配就保持公开。"""
+        return bool(self.admin_password) or self.github_ready or self.gitea_ready
+
+    @property
+    def oauth_enabled(self) -> bool:
+        """是否启用了 OAuth。
+
+        这不是「有没有配置项」的别名，而是一道产品边界：
+        **只有 OAuth 模式才谈得上「用户」，也只有用户才有资格持有 API token。**
+        纯密码模式是「单人管理」，没有身份可绑定，因此不提供 token 管理。
+        """
+        return self.github_ready or self.gitea_ready
 
     @property
     def github_allowed_set(self) -> set[str]:

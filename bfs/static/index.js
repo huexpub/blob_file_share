@@ -47,6 +47,8 @@ const $ = (selector) => document.querySelector(selector);
 const HISTORY_KEY = 'bfs.history';
 const OPTIONS_KEY = 'bfs.sendOptions';
 const HISTORY_LIMIT = 40;
+let managedHistory = false;
+let historyOwner = '';
 
 let draft = '';
 let files = [];
@@ -89,6 +91,10 @@ function saveHistory() {
 }
 
 function remember(share) {
+  if (managedHistory) {
+    refreshManagedHistory();
+    return;
+  }
   const found = share.detected || {};
   const entry = {
     id: share.id,
@@ -147,7 +153,19 @@ document.addEventListener('keydown', (event) => {
 const historyToggle = document.querySelector('#historyToggle');
 if (historyToggle) historyToggle.addEventListener('click', toggleHistory);
 
-$('#historyClear').addEventListener('click', () => {
+$('#historyClear').addEventListener('click', async () => {
+  if (managedHistory) {
+    if (!history.length) return;
+    if (!window.confirm('清空历史会焚毁当前账户名下的所有分享，且无法恢复。确定吗？')) return;
+    try {
+      const result = await api('/api/shares/mine', { method: 'DELETE' });
+      await refreshManagedHistory();
+      toast(`已焚毁 ${result.burned} 条分享`, 'ok');
+    } catch (error) {
+      toast(error.message || '清空失败', 'err');
+    }
+    return;
+  }
   if (!history.length) return;
   if (!window.confirm('清空本机的发送记录？（不会焚毁已发出的内容）')) return;
   history = [];
@@ -196,6 +214,11 @@ function renderHistory() {
   const list = $('#historyList');
   const badge = document.querySelector('#historyBadge');
   $('#historyCount').textContent = history.length ? `${history.length} 条` : '';
+  $('#historyNote').textContent = managedHistory
+    ? '管理式分享 · 删除历史会立即焚毁对应内容。'
+    : '只记录本机发出的链接，不存内容正文。';
+  $('#historyClear').textContent = managedHistory ? '清空并焚毁' : '清空记录';
+  $('#historyClear').classList.toggle('hidden', !managedHistory);
   if (badge) {
     // 顶栏只提示「有还没被读的」，不暴露条数细节
     const pending = history.filter(
@@ -218,17 +241,20 @@ function renderHistory() {
       const path = entry.url.replace(/^https?:\/\/[^/]+/, '');
       const sub = [entry.label, entry.language, formatBytes(entry.size)].filter(Boolean).join(' · ');
       return `
-      <button class="history-item" data-id="${escapeHtml(entry.id)}" type="button">
-        <div class="history-item-top">
-          <span class="truncate">${escapeHtml(entry.fileName || entry.label || '分享')}</span>
-          ${stateBadge(entry)}
-        </div>
-        <div class="history-item-sub truncate">${escapeHtml(sub)}</div>
-        <div class="history-item-foot">
-          <span class="mono truncate">${escapeHtml(path)}</span>
-          <span class="muted-2">${formatTime((entry.createdAt || 0) / 1000)}</span>
-        </div>
-      </button>`;
+      <div class="history-record">
+        <button class="history-item" data-id="${escapeHtml(entry.id)}" type="button">
+          <div class="history-item-top">
+            <span class="truncate">${escapeHtml(entry.fileName || entry.label || '分享')}</span>
+            ${stateBadge(entry)}
+          </div>
+          <div class="history-item-sub truncate">${escapeHtml(sub)}</div>
+          <div class="history-item-foot">
+            <span class="mono truncate">${escapeHtml(path)}</span>
+            <span class="muted-2">${formatTime((entry.createdAt || 0) / 1000)}</span>
+          </div>
+        </button>
+        ${managedHistory ? `<button class="history-burn" data-burn="${escapeHtml(entry.id)}" type="button" title="焚毁并删除" aria-label="焚毁并删除">${icon('fire')}</button>` : ''}
+      </div>`;
     })
     .join('');
   list.querySelectorAll('[data-id]').forEach((button) => {
@@ -237,11 +263,160 @@ function renderHistory() {
       if (entry) reopen(entry);
     });
   });
+  list.querySelectorAll('[data-burn]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const entry = history.find((item) => item.id === button.dataset.burn);
+      if (!entry || !window.confirm('焚毁后内容立即删除且无法恢复，确定吗？')) return;
+      button.disabled = true;
+      try {
+        await api(`/api/shares/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
+        await refreshManagedHistory();
+        toast('已焚毁', 'ok');
+      } catch (error) {
+        button.disabled = false;
+        toast(error.message || '焚毁失败', 'err');
+      }
+    });
+  });
   if (history.some((entry) => entry.state === 'active')) scheduleStatusPoll();
 }
 
 let pollTimer = 0;
 let polling = false;
+
+async function refreshManagedHistory() {
+  if (!managedHistory) return;
+  try {
+    const data = await api('/api/shares/mine');
+    historyOwner = data.owner || '';
+    history = (data.items || []).map((share) => ({
+      id: share.id,
+      kind: share.detected?.kind || '',
+      label: share.detected?.kind_label || (share.kind === 'text' ? '文本' : '文件'),
+      language: share.detected?.language || '',
+      fileName: share.file_name || '',
+      size: share.size,
+      createdAt: (share.created_at || 0) * 1000,
+      expiresAt: share.expires_at,
+      maxReads: share.max_reads,
+      readCount: share.read_count || 0,
+      remaining: share.remaining,
+      state: share.state,
+      url: share.url,
+      extractCode: '',
+      manageToken: '',
+      otaUrl: ''
+    }));
+    renderHistory();
+  } catch {
+    /* 请求端会统一处理失效登录；不打断上传主流程 */
+  }
+}
+
+async function initHistoryMode() {
+  if (!BOOT.gate) return;
+  const info = await authSession();
+  // 只有 OAuth 模式才有「账户」这回事：历史入库、可建 CI token
+  managedHistory = Boolean(info.methods?.oauth && info.authenticated);
+  if (!managedHistory) return;
+  $('#managedBanner').classList.remove('hidden');
+  $('#tokensBtn').classList.remove('hidden');
+  history = [];
+  $('#historyClear').classList.remove('hidden');
+  await refreshManagedHistory();
+}
+
+initHistoryMode();
+
+/* ---------------------------------------------------------------- CI token */
+
+function openTokens() {
+  $('#tokensMask').classList.remove('hidden');
+  document.body.classList.add('modal-open');
+  $('#tokenNew').classList.add('hidden');
+  loadTokens();
+}
+
+function closeTokens() {
+  $('#tokensMask').classList.add('hidden');
+  document.body.classList.remove('modal-open');
+  // 关掉之后明文就再也不显示了：清空输入框，避免留在 DOM 里
+  $('#tokenValue').value = '';
+  $('#tokenNew').classList.add('hidden');
+}
+
+async function loadTokens() {
+  const list = $('#tokenList');
+  list.innerHTML = '<div class="field-note">加载中…</div>';
+  try {
+    const data = await api('/api/tokens');
+    const items = data.items || [];
+    if (!items.length) {
+      list.innerHTML = '<div class="field-note">还没有 token。</div>';
+      return;
+    }
+    list.innerHTML = items
+      .map(
+        (item) => `
+        <div class="token-item">
+          <div class="token-item-main">
+            <span class="truncate">${escapeHtml(item.label || '(无备注)')}</span>
+            <span class="muted-2">${formatTime(item.last_used_at)}</span>
+          </div>
+          <button class="btn btn--ghost btn--sm btn--danger" data-revoke="${escapeHtml(
+            item.label || ''
+          )}" type="button">撤销</button>
+        </div>`
+      )
+      .join('');
+    list.querySelectorAll('[data-revoke]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        if (!window.confirm('撤销后使用该 token 的流水线会立即失败，确定吗？')) return;
+        try {
+          await api(`/api/tokens?label=${encodeURIComponent(button.dataset.revoke)}`, {
+            method: 'DELETE'
+          });
+          loadTokens();
+          toast('已撤销', 'ok');
+        } catch (error) {
+          toast(error.message || '撤销失败', 'err');
+        }
+      });
+    });
+  } catch (error) {
+    list.innerHTML = `<div class="field-note">${escapeHtml(error.message || '加载失败')}</div>`;
+  }
+}
+
+$('#tokensBtn').addEventListener('click', openTokens);
+$('#tokensClose').addEventListener('click', closeTokens);
+$('#tokensMask').addEventListener('click', (event) => {
+  if (event.target === $('#tokensMask')) closeTokens();
+});
+
+$('#tokenCreate').addEventListener('click', async () => {
+  const button = $('#tokenCreate');
+  button.disabled = true;
+  try {
+    const created = await api('/api/tokens', {
+      method: 'POST',
+      body: JSON.stringify({ label: $('#tokenLabel').value.trim() })
+    });
+    $('#tokenValue').value = created.token;
+    $('#tokenNew').classList.remove('hidden');
+    $('#tokenLabel').value = '';
+    loadTokens();
+  } catch (error) {
+    toast(error.message || '创建失败', 'err');
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$('#tokenCopy').addEventListener('click', async () => {
+  const ok = await copyText($('#tokenValue').value);
+  toast(ok ? '已复制' : '复制失败，请手动选择', ok ? 'ok' : 'err');
+});
 
 function scheduleStatusPoll() {
   window.clearInterval(pollTimer);
@@ -275,6 +450,12 @@ async function refreshStatuses() {
 /* ---------------------------------------------------------------- 重开历史 */
 
 function reopen(entry) {
+  if (managedHistory) {
+    const item = currentBatch.find((share) => share.id === entry.id);
+    if (item) showResult(item, { reused: true });
+    else window.open(entry.url, '_blank', 'noopener');
+    return;
+  }
   const isFile = ['binary', 'image'].includes(entry.kind) || Boolean(entry.fileName);
   currentBatch = [
     {

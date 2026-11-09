@@ -19,6 +19,12 @@
       BFS_GITHUB_CLIENT_ID: ${BFS_GITHUB_CLIENT_ID:-}
       BFS_GITHUB_CLIENT_SECRET: ${BFS_GITHUB_CLIENT_SECRET:-}
       BFS_GITHUB_ALLOWED_USERS: ${BFS_GITHUB_ALLOWED_USERS:-}
+      # Gitea 登录：三个都填才生效。启用 OAuth 才有账户历史和 CI token
+      BFS_GITEA_URL: ${BFS_GITEA_URL:-}
+      BFS_GITEA_CLIENT_ID: ${BFS_GITEA_CLIENT_ID:-}
+      BFS_GITEA_CLIENT_SECRET: ${BFS_GITEA_CLIENT_SECRET:-}
+      # CI 上传的默认有效期（小时）；0 = 永久
+      BFS_API_DEFAULT_TTL_HOURS: ${BFS_API_DEFAULT_TTL_HOURS:-0}
       # 挂载前缀：留空 = 根；填 bfs = 整个服务住进 /bfs（页面/API/链接都在里面）
       BFS_PATH_PREFIX: ${BFS_PATH_PREFIX:-}
       # 分享段：留空 = 跟前缀走（/bfs/<id>）；填 s 则用 /bfs/s/<id>

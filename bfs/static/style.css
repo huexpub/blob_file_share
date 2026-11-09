@@ -1895,6 +1895,52 @@ body.modal-open {
   max-width: 340px;
 }
 
+/* ---------- CI token 管理 ---------- */
+
+.modal--tokens {
+  max-width: 480px;
+}
+
+.token-create {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.token-create .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.token-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.token-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--wk-border-soft);
+}
+
+.token-item-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.token-new .banner {
+  margin-top: 8px;
+}
+
 .gate-body {
   display: grid;
   gap: 16px;
@@ -2148,6 +2194,47 @@ body.drawer-open .main {
 .history-item:hover {
   background: var(--wk-panel-2);
   border-color: var(--wk-border-soft);
+}
+
+/* 管理模式下每条历史右侧多一个焚毁按钮 */
+.history-record {
+  position: relative;
+}
+
+.history-record .history-item {
+  padding-right: 34px;
+}
+
+.history-burn {
+  position: absolute;
+  top: 6px;
+  right: 4px;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--wk-muted-2);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+
+.history-record:hover .history-burn,
+.history-burn:focus-visible {
+  opacity: 1;
+}
+
+.history-burn:hover {
+  color: var(--wk-danger);
+  border-color: var(--wk-border-soft);
+}
+
+.history-burn .icon {
+  width: 14px;
+  height: 14px;
 }
 
 .history-item-top {

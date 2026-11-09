@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS shares (
     burned_at         INTEGER,             -- 有值 = 已焚毁（内容已删）
     -- 「关闭才销毁」用的两阶段：打开时只占位，关闭时才真正扣次数 + 删盘
     claim_token       TEXT,                -- 谁正在看这份内容
-    claim_expires_at  INTEGER              -- 占位超时：超时就当作已消费（防止只开不关）
+    claim_expires_at  INTEGER,             -- 占位超时：超时就当作已消费（防止只开不关）
+    owner_id          TEXT                -- 登录用户 subject；CI 用 shared
 );
 
 CREATE INDEX IF NOT EXISTS idx_shares_expires ON shares (expires_at);
@@ -72,6 +73,17 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_at ON events (at);
+
+-- CI 上传凭据。只有 OAuth 模式才会写入这张表（见 bfs/tokens.py）。
+CREATE TABLE IF NOT EXISTS api_tokens (
+    token_hash   TEXT PRIMARY KEY,      -- sha256(明文)；明文不落库
+    owner_id     TEXT NOT NULL,         -- 归属的 OAuth 用户 subject
+    label        TEXT,                  -- 用户自己起的名字，如 "ci-firmware"
+    created_at   INTEGER NOT NULL,
+    last_used_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_tokens_owner ON api_tokens (owner_id);
 """
 
 
@@ -126,6 +138,7 @@ _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("language", "TEXT"),
         ("claim_token", "TEXT"),
         ("claim_expires_at", "INTEGER"),
+        ("owner_id", "TEXT"),
     ],
 }
 

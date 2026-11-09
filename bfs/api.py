@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 from typing import Any
 from urllib.parse import quote
 
@@ -37,13 +38,17 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 from starlette.datastructures import UploadFile
 
-from . import auth, security
+from . import auth, security, tokens
+from .history import burn_owned, clear_owned, list_shares, status_items
 from .analyze import KIND_BINARY, KIND_IMAGE, KIND_LABELS, analyze, normalize, render_html
 from .config import Settings
 from .ratelimit import SlidingWindow
 from .service import FilePayload, Service, ShareError
 
 router = APIRouter()
+
+#: ?? CI ?????????
+MAX_BATCH_FILES = 20
 
 
 # ---------------------------------------------------------------- 请求体
@@ -100,6 +105,21 @@ class StatusBody(BaseModel):
     """批量查状态。发送端历史用它把「待读取」自动变成「已读」。"""
 
     ids: list[str] = Field(default_factory=list, max_length=200)
+
+
+class TokenBody(BaseModel):
+    """创建 CI token。``label`` 只是给自己看的备注。"""
+
+    label: str = Field(default="", max_length=64)
+
+
+class BatchUploadBody(BaseModel):
+    """可选的 multipart 描述字段；files 通过重复的 `file` 字段提交。"""
+
+    ttl_hours: int | None = None
+    max_reads: int | None = None
+    extract_code: str | None = None
+    no_code: bool = False
 
 
 class CommitBody(BaseModel):
@@ -225,6 +245,8 @@ def auth_session(request: Request) -> dict[str, Any]:
         "methods": {
             "password": bool(settings.admin_password),
             "github": settings.github_ready,
+            "gitea": settings.gitea_ready,
+            "oauth": settings.oauth_enabled,
         },
         "login_path": settings.login_path,
     }
@@ -308,6 +330,55 @@ async def auth_github_callback(
 
     response = RedirectResponse(f"{settings.prefix}/" if settings.prefix else "/", status_code=302)
     _set_session(response, request, f"github:{login}")
+    response.delete_cookie(auth.STATE_COOKIE, path="/")
+    return response
+
+
+@router.get("/auth/gitea/start")
+def auth_gitea_start(request: Request) -> Response:
+    settings = get_settings(request)
+    if not settings.gitea_ready:
+        raise ShareError("gitea_disabled", "未配置 Gitea 登录", 400)
+    state = auth.new_state(_secret(request))
+    redirect_uri = settings.external_url(base_url(request), f"{settings.api_prefix}/auth/gitea/callback")
+    response = RedirectResponse(
+        auth.gitea_authorize_url(settings, redirect_uri, state), status_code=302
+    )
+    response.set_cookie(
+        auth.STATE_COOKIE,
+        state,
+        max_age=600,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+        path="/",
+    )
+    return response
+
+
+@router.get("/auth/gitea/callback")
+async def auth_gitea_callback(
+    request: Request, code: str = "", state: str = "", error: str = ""
+) -> Response:
+    settings = get_settings(request)
+    login_url = settings.login_path
+    if error:
+        return RedirectResponse(f"{login_url}?error=denied", status_code=302)
+    if not auth.verify_state(_secret(request), state) or state != request.cookies.get(
+        auth.STATE_COOKIE
+    ):
+        return RedirectResponse(f"{login_url}?error=state", status_code=302)
+
+    redirect_uri = settings.external_url(
+        base_url(request), f"{settings.api_prefix}/auth/gitea/callback"
+    )
+    try:
+        login = await asyncio.to_thread(auth.exchange_gitea_code, settings, code, redirect_uri)
+    except auth.OAuthError:
+        return RedirectResponse(f"{login_url}?error=oauth", status_code=302)
+
+    response = RedirectResponse(f"{settings.prefix}/" if settings.prefix else "/", status_code=302)
+    _set_session(response, request, f"gitea:{login}")
     response.delete_cookie(auth.STATE_COOKIE, path="/")
     return response
 
@@ -398,9 +469,10 @@ def inspect(body: InspectBody) -> dict[str, Any]:
 
 
 @router.post("/shares")
-async def create_share(request: Request, _admin: str = Depends(require_admin)) -> JSONResponse:
-    """建分享。Content-Type 是 multipart 就收文件，否则按 JSON 收文本。"""
+async def create_share(request: Request, admin: str = Depends(require_admin)) -> JSONResponse:
+    """建单个文本/文件分享（网页现有流程）。"""
     _check_rate(request, "create")
+    owner = admin if admin != "anonymous" else None
     service = get_service(request)
     settings = get_settings(request)
     content_type = request.headers.get("content-type", "")
@@ -421,6 +493,7 @@ async def create_share(request: Request, _admin: str = Depends(require_admin)) -
             no_code=_bool_field(form.get("no_code")),
             ip=client_ip(request),
             base_url=base,
+            owner_id=owner,
         )
     else:
         raw = await request.json()
@@ -434,6 +507,7 @@ async def create_share(request: Request, _admin: str = Depends(require_admin)) -
             kind=body.kind,
             ip=client_ip(request),
             base_url=base,
+            owner_id=owner,
         )
 
     payload = {
@@ -450,6 +524,59 @@ async def create_share(request: Request, _admin: str = Depends(require_admin)) -
     return JSONResponse(payload, status_code=201)
 
 
+@router.get("/tokens")
+def list_api_tokens(
+    request: Request, admin: str = Depends(require_admin)
+) -> dict[str, Any]:
+    """列自己的 CI token。只回元信息 —— 明文永远不会再出现。"""
+    if not get_settings(request).oauth_enabled:
+        raise ShareError("oauth_required", "API token 需要启用 OAuth 登录", 403)
+    return {
+        "owner": admin,
+        "items": tokens.list_tokens(get_service(request), admin),
+        "max": tokens.MAX_TOKENS_PER_OWNER,
+    }
+
+
+@router.post("/tokens")
+def create_api_token(
+    body: TokenBody, request: Request, admin: str = Depends(require_admin)
+) -> JSONResponse:
+    """创建 token。明文只在这一条响应里出现一次。"""
+    if not get_settings(request).oauth_enabled:
+        raise ShareError("oauth_required", "API token 需要启用 OAuth 登录", 403)
+    created = tokens.create_token(get_service(request), admin, body.label)
+    return JSONResponse(created, status_code=201)
+
+
+@router.delete("/tokens")
+def revoke_api_tokens(
+    request: Request,
+    admin: str = Depends(require_admin),
+    label: str | None = None,
+) -> dict[str, int]:
+    """撤销 token。带 ``?label=`` 只撤销一个，不带则全部撤销。"""
+    if not get_settings(request).oauth_enabled:
+        raise ShareError("oauth_required", "API token 需要启用 OAuth 登录", 403)
+    return {"revoked": tokens.revoke_tokens(get_service(request), admin, label)}
+
+
+@router.get("/shares/mine")
+def owned_shares(
+    request: Request,
+    admin: str = Depends(require_admin),
+) -> dict[str, Any]:
+    """当前账户的分享历史：网页端和 CI 上传的都算在内。"""
+    settings = get_settings(request)
+    if not settings.oauth_enabled:
+        raise ShareError("managed_history_disabled", "未启用 OAuth 登录", 403)
+    return {
+        "managed": True,
+        "owner": admin,
+        "items": list_shares(get_service(request), admin, base_url(request)),
+    }
+
+
 @router.get("/shares/{share_id}")
 def share_meta(share_id: str, request: Request) -> dict[str, Any]:
     service = get_service(request)
@@ -458,33 +585,131 @@ def share_meta(share_id: str, request: Request) -> dict[str, Any]:
     return share
 
 
+@router.post("/shares/batch")
+async def create_batch_share(request: Request) -> JSONResponse:
+    """CI ??????? Bearer token???????????
+
+    ?????????
+      1. ????? OAuth ?? ?????????????? token ????
+      2. ?????? Bearer token?
+      3. token ?????
+
+    ???????? = token ??????? CI ????????????
+    ??????????????????????????
+    """
+    settings = get_settings(request)
+    if not settings.oauth_enabled:
+        raise ShareError(
+            "oauth_required", "CI 上传需要启用 OAuth 登录（GitHub 或 Gitea）", 403
+        )
+
+    scheme, _, credential = request.headers.get("authorization", "").partition(" ")
+    owner = (
+        tokens.resolve_owner(get_service(request), credential.strip())
+        if scheme.lower() == "bearer"
+        else None
+    )
+    if not owner:
+        raise ShareError("unauthorized", "API token 无效或已被撤销", 401)
+
+    _check_rate(request, "api_batch")
+    form = await request.form()
+    uploads = [item for item in form.getlist("file") if isinstance(item, UploadFile)]
+    if not uploads:
+        raise ShareError("no_file", "至少上传一个 file 字段", 400)
+    if len(uploads) > MAX_BATCH_FILES:
+        raise ShareError(
+            "too_many_files", f"一次最多上传 {MAX_BATCH_FILES} 个文件", 413
+        )
+
+    ttl_hours = _int_field(form.get("ttl_hours"))
+    if ttl_hours is None:
+        ttl_hours = settings.api_default_ttl_hours
+    max_reads = _int_field(form.get("max_reads"))
+    if max_reads is None:
+        max_reads = -1
+    extract_code = _str_field(form.get("extract_code"))
+    no_code = _bool_field(form.get("no_code"))
+
+    service = get_service(request)
+    created = []
+    for upload in uploads:
+        item = service.create_file(
+            file_name=upload.filename or "download.bin",
+            data=upload.file,
+            content_type=upload.content_type or "application/octet-stream",
+            ttl_hours=ttl_hours,
+            max_reads=max_reads,
+            extract_code=extract_code,
+            no_code=no_code,
+            ip=client_ip(request),
+            base_url=base_url(request),
+            owner_id=owner,
+        )
+        created.append({
+            **item.share,
+            "manage_token": item.manage_token,
+            "extract_code": item.extract_code,
+        })
+
+    return JSONResponse(
+        {"items": created, "message": _batch_share_message(created), "owner": owner},
+        status_code=201,
+    )
+
+
+def _batch_share_message(items: list[dict[str, Any]]) -> str:
+    if len(items) == 1:
+        item = items[0]
+        label = item.get("file_name") or item.get("detected", {}).get("kind_label") or "文件"
+        lines = [f"我分享给你一个文件（{label}）：", item["url"]]
+        if item.get("extract_code"):
+            lines.append(f"分享码 {item['extract_code']}")
+        if item.get("max_reads") == 1:
+            lines.append("阅后即焚，打开看完就没了。")
+        return "\n".join(lines)
+
+    lines = [f"我分享给你 {len(items)} 个文件："]
+    for index, item in enumerate(items, 1):
+        label = item.get("file_name") or "文件"
+        lines.extend([f"{index}. {label}", f"   {item['url']}"])
+        if item.get("extract_code"):
+            lines.append(f"   分享码 {item['extract_code']}")
+    if any(item.get("max_reads") == 1 for item in items):
+        lines.append("（标 1 次的是阅后即焚，打开看完就没了）")
+    return "\n".join(lines)
+
+
+@router.delete("/shares/mine")
+def clear_owned_shares(request: Request, admin: str = Depends(require_admin)) -> dict[str, int]:
+    if not get_settings(request).oauth_enabled:
+        raise ShareError("managed_history_disabled", "未启用 OAuth 登录", 403)
+    return {
+        "burned": clear_owned(get_service(request), admin, ip=client_ip(request))
+    }
+
+
+@router.delete("/shares/{share_id}")
+def delete_owned_share(
+    share_id: str,
+    request: Request,
+    admin: str = Depends(require_admin),
+) -> dict[str, Any]:
+    """历史删除即焚毁；只能操作自己名下的内容。"""
+    if not get_settings(request).oauth_enabled:
+        raise ShareError("managed_history_disabled", "未启用 OAuth 登录", 403)
+    return burn_owned(
+        get_service(request), admin, share_id, ip=client_ip(request)
+    )
+
+
 @router.post("/shares/status")
 def shares_status(
-    body: StatusBody, request: Request, _admin: str = Depends(require_admin)
+    body: StatusBody, request: Request, admin: str = Depends(require_admin)
 ) -> dict[str, Any]:
-    """批量查状态（不消耗次数）。
-
-    发送端历史用它把「待读取」刷成「已读」。只回状态字段，不回正文 ——
-    这条路径本身不能成为绕过「阅后即焚」的窥视口。
-    """
-    service = get_service(request)
-    items = []
-    for share_id in dict.fromkeys(body.ids):  # 去重且保序
-        try:
-            share = service.peek(share_id)
-        except ShareError:
-            items.append({"id": share_id, "state": "deleted", "read_count": 0, "remaining": 0})
-            continue
-        items.append(
-            {
-                "id": share["id"],
-                "state": share["state"],
-                "read_count": share["read_count"],
-                "remaining": share["remaining"],
-                "expires_at": share["expires_at"],
-            }
-        )
-    return {"items": items}
+    """批量查状态。OAuth 模式下只回答本人名下的条目。"""
+    owner = admin if get_settings(request).oauth_enabled else None
+    return {"items": status_items(get_service(request), owner, list(dict.fromkeys(body.ids)))}
 
 
 @router.post("/shares/{share_id}/unlock")

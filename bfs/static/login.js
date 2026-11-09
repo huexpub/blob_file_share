@@ -23,10 +23,10 @@ mountTopbar({ subtitle: '登录', home: false, minimal: false });
 const $ = (selector) => document.querySelector(selector);
 
 const MESSAGES = {
-  denied: '你取消了 GitHub 授权',
+  denied: '你取消了授权',
   state: '登录已过期，请重新试一次',
-  oauth: '和 GitHub 通信失败，请稍后再试',
-  not_allowed: '这个 GitHub 账号没有权限'
+  oauth: 'OAuth 服务通信失败，请稍后再试',
+  not_allowed: '这个账号没有权限'
 };
 
 function nextHref() {
@@ -48,20 +48,21 @@ async function boot() {
   });
   $('#authIcon').innerHTML = icon('lock');
   $('#githubBtn').querySelector('.icon-wrap').innerHTML = icon('github');
+  $('#giteaBtn').querySelector('.icon-wrap').innerHTML = icon('git');
 
   const params = new URLSearchParams(location.search);
   const error = params.get('error');
   if (error) showError(MESSAGES[error] || '登录失败，请重试');
 
-  let info = { methods: { password: true, github: false } };
+  let info = { methods: { password: true, github: false, gitea: false } };
   try {
     info = await api('/api/auth/session', { noRedirect: true });
   } catch {
     /* 会话接口挂了也不挡住密码登录：服务端仍会校验 */
   }
 
-  const { password, github } = info.methods || {};
-  if (!password && !github) {
+  const { password, github, gitea } = info.methods || {};
+  if (!password && !github && !gitea) {
     showError('服务端未配置登录方式，请联系管理员');
     $('#submitBtn').disabled = true;
     return;
@@ -78,11 +79,17 @@ async function boot() {
     $('#submitBtn').classList.add('hidden');
   }
 
+  const oauth = github || gitea;
   if (github) {
     $('#githubBtn').classList.remove('hidden');
     $('#githubBtn').href = resolveUrl('/api/auth/github/start');
-    if (password) $('#divider').classList.remove('hidden');
   }
+  if (gitea) {
+    $('#giteaBtn').classList.remove('hidden');
+    $('#giteaBtn').querySelector('.icon-wrap').innerHTML = icon('git');
+    $('#giteaBtn').href = resolveUrl('/api/auth/gitea/start');
+  }
+  if (password && oauth) $('#divider').classList.remove('hidden');
 
   if (password) $('#password').focus();
 }

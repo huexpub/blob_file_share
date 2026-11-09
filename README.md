@@ -103,7 +103,12 @@ BFS_GITHUB_CLIENT_ID=xxx
 BFS_GITHUB_CLIENT_SECRET=xxx
 BFS_GITHUB_ALLOWED_USERS=huexpub      # 只有这个账号能登录
 
-# 两种都配也可以，登录页会同时给出两个入口
+# 方式三：Gitea 登录（自建实例，三项都要填）
+BFS_GITEA_URL=https://git.example.com
+BFS_GITEA_CLIENT_ID=xxx
+BFS_GITEA_CLIENT_SECRET=xxx
+
+# 可以混配，登录页会同时给出所有可用入口
 ```
 
 配置 GitHub 时，OAuth App 的 **Authorization callback URL** 要填：
@@ -128,6 +133,46 @@ https://<你的域名>/api/auth/github/callback         # 根部署
 | `BFS_SESSION_TTL_HOURS` | 登录态有效期，默认 168（7 天） |
 | `BFS_GITHUB_CLIENT_ID` / `_SECRET` | OAuth App 的凭据 |
 | `BFS_GITHUB_ALLOWED_USERS` | 允许登录的 GitHub 用户名，逗号分隔 |
+| `BFS_GITEA_URL` | Gitea 实例地址，如 `https://git.example.com` |
+| `BFS_GITEA_CLIENT_ID` / `_SECRET` | Gitea OAuth 应用凭据 |
+
+## 管理模式与 CI 上传
+
+**只有启用了 OAuth（GitHub 或 Gitea）才是「管理模式」**，才会出现账户概念。
+纯密码模式仍然是「单人管理」：能分享，但没有用户历史，也没有 CI token。
+
+开启 OAuth 后：
+
+- 分享历史存数据库、按账户隔离，换设备也看得到
+- 在历史抽屉里点「CI Token」自助创建，明文只显示一次
+- 删除历史 = 立即焚毁内容（不是只从列表里移除）
+
+### 给 CI 用的上传接口
+
+```bash
+curl -X POST https://<域名>/bfs/api/shares/batch \
+  -H "Authorization: Bearer bfs_xxxxxxxxxxxx" \
+  -F "file=@firmware.bin" \
+  -F "file=@symbols.zip"
+```
+
+响应里的 `message` 可以直接转发出去：
+
+```
+我分享给你 2 个文件：
+1. firmware.bin
+   https://<域名>/bfs/s/abcd1234
+   分享码 1379
+2. symbols.zip
+   https://<域名>/bfs/s/efgh5678
+   分享码 2468
+```
+
+默认**永久有效、不限次数**（构建产物是给人长期下载的），
+可用 `BFS_API_DEFAULT_TTL_HOURS` 改；请求里也能带 `ttl_hours` / `max_reads` 覆盖。
+
+用 token 上传的内容归属 token 的所有者，所以会出现在本人的历史里，
+和网页端分享一起管理、一起焚毁。撤销 token 后流水线立即失败。
 
 ## 常用命令
 

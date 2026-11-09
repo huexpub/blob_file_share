@@ -214,3 +214,44 @@ def test_derived_paths(path_prefix, share_segment, expected_prefix, expected_sha
     assert settings.prefix == expected_prefix
     assert settings.share_prefix == expected_share
     assert settings.api_prefix == expected_api
+
+
+# ---------------------------------------------------------------- 页面结构
+#
+# 页脚必须留在 `.shell` 里面。`.shell` 是 `min-height: 100vh` 的 flex 列，
+# 页脚在它外面时，内容不足一屏会把页脚顶到折叠线以下 —— 表现就是
+# 「内容明明很短，却要滚一下才看得到页脚」。这类问题只有真机才看得见，
+# 所以用结构断言盯住它。
+
+
+def _footer_is_inside_shell(page: str) -> bool:
+    import re
+
+    index = page.find('class="foot"')
+    assert index > 0, "页面里找不到页脚"
+    head = page[:index]
+    # 页脚出现时还没闭合的 div 层数：1 = 在 .shell 里，0 = 已经在 .shell 外面
+    return len(re.findall(r"<div\b", head)) - len(re.findall(r"</div>", head)) == 1
+
+
+@pytest.mark.parametrize("path", ["/"])
+def test_upload_page_footer_is_inside_shell(tmp_path, path):
+    from fastapi.testclient import TestClient
+
+    app = create_app(make_settings(tmp_path))
+    with TestClient(app) as client:
+        page = client.get(path).text
+    assert _footer_is_inside_shell(page)
+
+
+def test_share_page_footer_is_inside_shell(tmp_path):
+    from fastapi.testclient import TestClient
+
+    app = create_app(make_settings(tmp_path))
+    with TestClient(app) as client:
+        created = client.post("/api/shares", json={"text": "x", "kind": "text"})
+        share = created.json()
+        page = client.get(f"/s/{share['id']}").text
+    assert _footer_is_inside_shell(page)
+    # 页脚只能出现一次：曾经 share.html 里同时有正确的和外部的各一份
+    assert page.count('class="foot"') == 1

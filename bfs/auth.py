@@ -149,53 +149,94 @@ def authorized_github_user(settings: Settings, login: str) -> bool:
     return login.strip().lower() in settings.github_allowed_set
 
 
+def _provider_request(url: str, *, data: bytes | None = None, headers: dict[str, str] | None = None) -> dict:
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Accept": "application/json", "User-Agent": "bfs", **(headers or {})},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        raise OAuthError(f"OAuth provider request failed: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise OAuthError("OAuth provider returned invalid JSON")
+    return payload
+
+
+def _exchange_oauth_code(
+    *,
+    token_url: str,
+    user_url: str,
+    client_id: str,
+    client_secret: str,
+    code: str,
+    redirect_uri: str,
+) -> str:
+    if not code:
+        raise OAuthError("missing code")
+    body = urllib.parse.urlencode(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+        }
+    ).encode("utf-8")
+    token_payload = _provider_request(
+        token_url,
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    token = token_payload.get("access_token")
+    if not token:
+        raise OAuthError("OAuth provider did not return an access token")
+    profile = _provider_request(
+        user_url,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    login = profile.get("login") or profile.get("username")
+    if not login:
+        raise OAuthError("OAuth provider did not return a username")
+    return str(login)
+
+
 def exchange_code(settings: Settings, code: str, redirect_uri: str) -> str:
     """code -> access_token -> GitHub login。
 
     阻塞调用（``urllib``），路由里用 ``asyncio.to_thread`` 包一层 ——
     为这一次请求引入 httpx 或 authlib 不值得。
     """
-    if not code:
-        raise OAuthError("缺少 code")
-
-    body = urllib.parse.urlencode(
-        {
-            "client_id": settings.github_client_id,
-            "client_secret": settings.github_client_secret,
-            "code": code,
-            "redirect_uri": redirect_uri,
-        }
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        _GITHUB_TOKEN,
-        data=body,
-        headers={"Accept": "application/json", "User-Agent": "bfs"},
+    return _exchange_oauth_code(
+        token_url=_GITHUB_TOKEN,
+        user_url=_GITHUB_USER,
+        client_id=settings.github_client_id,
+        client_secret=settings.github_client_secret,
+        code=code,
+        redirect_uri=redirect_uri,
     )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            token_payload = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-        raise OAuthError(f"换取 token 失败：{exc}") from exc
 
-    token = token_payload.get("access_token")
-    if not token:
-        raise OAuthError(f"GitHub 未返回 token：{token_payload.get('error')}")
 
-    profile_request = urllib.request.Request(
-        _GITHUB_USER,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "bfs",
-        },
+def gitea_authorize_url(settings: Settings, redirect_uri: str, state: str) -> str:
+    params = {
+        "client_id": settings.gitea_client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "read:user",
+        "state": state,
+    }
+    return f"{settings.gitea_url}/login/oauth/authorize?{urllib.parse.urlencode(params)}"
+
+
+def exchange_gitea_code(settings: Settings, code: str, redirect_uri: str) -> str:
+    """Exchange Gitea OAuth code and return the authenticated username."""
+    return _exchange_oauth_code(
+        token_url=f"{settings.gitea_url}/login/oauth/access_token",
+        user_url=f"{settings.gitea_url}/api/v1/user",
+        client_id=settings.gitea_client_id,
+        client_secret=settings.gitea_client_secret,
+        code=code,
+        redirect_uri=redirect_uri,
     )
-    try:
-        with urllib.request.urlopen(profile_request, timeout=15) as response:
-            profile = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-        raise OAuthError(f"读取用户信息失败：{exc}") from exc
-
-    login = profile.get("login")
-    if not login:
-        raise OAuthError("GitHub 未返回 login")
-    return str(login)
