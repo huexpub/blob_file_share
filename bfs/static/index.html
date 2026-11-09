@@ -104,6 +104,24 @@
       </footer>
     </div>
 
+    <!-- 发送历史抽屉：只在「非 OAuth 模式」使用（没有账户概念，历史存本机）。
+         OAuth 模式改成 /history 独立页面，两者互斥。 -->
+    <div class="history-drawer-mask hidden" id="historyMask"></div>
+    <aside class="history-drawer" id="historyDrawer" aria-label="发送历史">
+      <div class="send-history">
+        <div class="send-history-head">
+          <span>发送历史</span>
+          <span class="hint" id="historyCount"></span>
+          <button class="btn btn--ghost btn--sm btn--icon" id="historyClose" title="关闭">×</button>
+        </div>
+        <div class="send-history-list" id="historyList"></div>
+        <div class="send-history-foot">
+          <span class="field-note" id="historyNote">只记录本机发出的链接，不存内容正文。</span>
+          <button class="btn btn--ghost btn--sm" id="historyClear" type="button">清空记录</button>
+        </div>
+      </div>
+    </aside>
+
     <div class="modal-mask hidden" id="optionsMask">
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="optionsTitle">
         <div class="modal-head">

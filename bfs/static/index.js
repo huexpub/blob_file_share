@@ -33,14 +33,35 @@ import {
 } from './app.js';
 
 initTheme();
-mountTopbar({ subtitle: '快传', nav: true });
 
-// 开了闸门但没登录：直接带去登录页，别让用户先看到上传界面再被 401 打回来
-if (BOOT.gate) {
-  authSession().then((info) => {
-    if (!info.authenticated) redirectToLogin();
-  });
+/*
+ * 顶栏分两种形态，取决于是不是「OAuth 管理模式」：
+ *
+ *   OAuth 模式    登录用户有账户，历史入库、可管 CI token
+ *                 -> 顶栏给「历史 / 设置」两个独立页面入口
+ *   其它模式      公开 或 仅管理员密码，没有账户这回事
+ *                 -> 保持原样：历史用右侧抽屉，不显示设置
+ *
+ * 所以这里不能先 mountTopbar 再判断，必须先问清楚再渲染。
+ */
+async function bootTopbar() {
+  if (!BOOT.gate) {
+    mountTopbar({ subtitle: '快传', history: true });
+    return;
+  }
+  const info = await authSession();
+  if (!info.authenticated) {
+    redirectToLogin();
+    return;
+  }
+  managedHistory = Boolean(info.methods?.oauth);
+  if (managedHistory) {
+    mountTopbar({ subtitle: '快传', nav: true });
+  } else {
+    mountTopbar({ subtitle: '快传', history: true });
+  }
 }
+
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -58,6 +79,9 @@ let inspectTimer = 0;
 /** 当前结果弹窗对应的那一批分享 */
 let currentBatch = [];
 let history = loadHistory();
+
+// 顶栏形态取决于是否 OAuth 管理模式，所以放在变量初始化之后再问
+bootTopbar();
 
 /* ---------------------------------------------------------------- 图标 */
 
@@ -144,15 +168,62 @@ function stateBadge(entry) {
 }
 
 function renderHistory() {
-  // 历史已经是独立页面（/history），这里不再渲染列表，
-  // 只维护顶栏「历史」入口上的未读角标。
   const badge = document.querySelector('#historyBadge');
-  if (!badge) return;
-  const pending = history.filter(
-    (entry) => entry.state === 'active' && !entry.readCount
-  ).length;
-  badge.textContent = String(pending);
-  badge.classList.toggle('hidden', pending === 0);
+  if (badge) {
+    // 顶栏只提示「有还没被读的」，不暴露条数细节
+    const pending = history.filter(
+      (entry) => entry.state === 'active' && !entry.readCount
+    ).length;
+    badge.textContent = String(pending);
+    badge.classList.toggle('hidden', pending === 0);
+  }
+
+  // OAuth 模式用 /history 独立页面，本页没有抽屉可渲染
+  const list = $('#historyList');
+  if (!list) return;
+
+  const count = $('#historyCount');
+  if (count) count.textContent = history.length ? `${history.length} 条` : '';
+
+  if (!history.length) {
+    list.innerHTML = `
+      <div class="history-empty">
+        ${icon('link')}
+        <span>还没有发过东西</span>
+      </div>`;
+    window.clearInterval(pollTimer);
+    return;
+  }
+
+  list.innerHTML = history
+    .map((entry) => {
+      const path = entry.url.replace(/^https?:\/\/[^/]+/, '');
+      const sub = [entry.label, entry.language, formatBytes(entry.size)]
+        .filter(Boolean)
+        .join(' · ');
+      return `
+      <button class="history-item" data-id="${escapeHtml(entry.id)}" type="button">
+        <div class="history-item-top">
+          <span class="truncate">${escapeHtml(entry.fileName || entry.label || '分享')}</span>
+          ${stateBadge(entry)}
+        </div>
+        <div class="history-item-sub truncate">${escapeHtml(sub)}</div>
+        <div class="history-item-foot">
+          <span class="mono truncate">${escapeHtml(path)}</span>
+          <span class="muted-2">${formatTime((entry.createdAt || 0) / 1000)}</span>
+        </div>
+      </button>`;
+    })
+    .join('');
+
+  list.querySelectorAll('[data-id]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const entry = history.find((item) => item.id === button.dataset.id);
+      if (entry) reopen(entry);
+    });
+  });
+
+  if (history.some((entry) => entry.state === 'active')) scheduleStatusPoll();
 }
 
 let pollTimer = 0;
@@ -187,18 +258,63 @@ async function refreshManagedHistory() {
   }
 }
 
-async function initHistoryMode() {
-  if (!BOOT.gate) return;
-  const info = await authSession();
-  // 只有 OAuth 模式才有「账户」这回事，历史才存服务端。
-  // 顶栏的「历史 / 设置」是独立页面，这里只决定本地还记不记。
-  managedHistory = Boolean(info.methods?.oauth && info.authenticated);
-  if (!managedHistory) return;
+// OAuth 模式下历史存在服务端：进来就先拉一次，让顶栏角标有数。
+// 非 OAuth 模式读的是 localStorage，已经在 loadHistory() 里读好了。
+if (managedHistory) {
   history = [];
-  await refreshManagedHistory();
+  refreshManagedHistory();
 }
 
-initHistoryMode();
+/* ---------------------------------------------------------------- 抽屉开关 */
+//
+// 只有非 OAuth 模式才有抽屉（OAuth 模式用 /history 独立页面）。
+// 这里全部用空值保护，避免在另一套形态下报错。
+
+function openHistory() {
+  const drawer = $('#historyDrawer');
+  if (!drawer) return;
+  drawer.classList.add('is-open');
+  $('#historyMask')?.classList.remove('hidden');
+  document.body.classList.add('drawer-open');
+  renderHistory();
+  refreshStatuses();
+}
+
+function closeHistory() {
+  const drawer = $('#historyDrawer');
+  if (!drawer) return;
+  drawer.classList.remove('is-open');
+  $('#historyMask')?.classList.add('hidden');
+  document.body.classList.remove('drawer-open');
+}
+
+function toggleHistory() {
+  const drawer = $('#historyDrawer');
+  if (!drawer) return;
+  if (drawer.classList.contains('is-open')) closeHistory();
+  else openHistory();
+}
+
+$('#historyMask')?.addEventListener('click', closeHistory);
+$('#historyClose')?.addEventListener('click', closeHistory);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closeHistory();
+});
+// 顶栏是异步挂载的（要先问登录形态），所以用事件委托而不是直接绑定：
+// 模块顶层执行时 #historyToggle 还不存在。
+document.addEventListener('click', (event) => {
+  if (event.target.closest('#historyToggle')) toggleHistory();
+});
+
+$('#historyClear')?.addEventListener('click', () => {
+  if (!history.length) return;
+  if (!window.confirm('清空本机的发送记录？（不会焚毁已发出的内容）')) return;
+  history = [];
+  saveHistory();
+  renderHistory();
+  toast('已清空发送记录', 'ok');
+});
+
 
 function scheduleStatusPoll() {
   window.clearInterval(pollTimer);
