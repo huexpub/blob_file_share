@@ -254,6 +254,20 @@ class Service:
             return True
         return False
 
+    def _delete_row(self, conn, share_id: str) -> None:
+        """彻底删掉一条分享记录（内容已焚毁的前提下）。
+
+        与 ``_burn`` 的区别：焚毁只清内容、留墓碑，好让接收方看到
+        「已焚毁」；这里连行一起删，用于「从历史里删除」——
+        主动删除不需要墓碑。
+        """
+        conn.execute("DELETE FROM share_files WHERE share_id = ?", (share_id,))
+        conn.execute("DELETE FROM ota_tokens WHERE share_id = ?", (share_id,))
+        # 审计事件保留 share_id 但不做外键约束，这里一并清掉，
+        # 避免删掉的分享在事件表里继续被统计
+        conn.execute("DELETE FROM events WHERE share_id = ?", (share_id,))
+        conn.execute("DELETE FROM shares WHERE id = ?", (share_id,))
+
     # ---------------------------------------------------------------- 创建
     #
     # 一次「发布」= 一条分享。用户可能同时粘一段代码 + 拖两个文件，
@@ -701,6 +715,16 @@ class Service:
             if file_row["idx"] == idx:
                 return self._file_payload(file_row)
         raise ShareError("not_found", "文件不存在", 404)
+
+    def is_live(self, share_id: str) -> bool:
+        """分享是否还能读（未焚毁、未过期、次数未用尽）。
+
+        用于「按文件取」这类不带提取码的读操作：真正的消费语义由
+        claim/commit 管，这里只回答「还能不能拿」。
+        """
+        with session(self.settings.db_path) as conn:
+            row = self._get_row(conn, share_id)
+        return row["burned_at"] is None and self._state(row) == "active"
 
     def open_share(
         self,

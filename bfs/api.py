@@ -815,16 +815,27 @@ def share_file(
 ) -> Response:
     """取多文件分享里的某一个文件。
 
-    不扣次数：消费仍然只发生在 ``/commit``（关闭页面）。这里只校验
-    调用方确实已经打开过这份分享（带了有效 claim_token 或提取码票据）。
+    不扣次数：消费仍然只发生在 ``/commit``（关闭页面）。
+
+    鉴权分三种，依次放宽：
+      1. 提取码票据（unlock 下发的 cookie）—— 最可靠；
+      2. 有效 claim_token —— 同一页面打开期间；
+      3. 分享本身是「无码且仍可读」—— 这种情况本来点开链接就能看，
+         拦着没有意义，反而会让「下载完一个文件、页面被判定消费后再下
+         另一个」失败。
+
+    第 3 条是修 bug 加的：commit 会清空 claim_token（表示「这一轮看完了」），
+    但它不该让同一份**不限次数**的分享在页面上直接失效。
     """
     service = get_service(request)
-    verified = _unlocked(request, share_id) or service.verify_claim(
-        share_id, claim_token
-    )
     view = service.peek(share_id, base_url(request))
+    verified = (
+        _unlocked(request, share_id)
+        or service.verify_claim(share_id, claim_token)
+        or (not view["has_extract_code"] and service.is_live(share_id))
+    )
     if not verified:
-        # 没解锁就先要求提取码，和 claim 的行为保持一致
+        # 有提取码但还没解锁：走一遍不消费的校验
         view, _ = service.open_share(
             share_id,
             code=code,
@@ -946,7 +957,13 @@ def share_download(
     service = get_service(request)
     # 分享页已经 claim 过（带了 claim_token）：用票据证明身份，
     # 而不是让用户再输一遍提取码。消费仍然只在 commit 时发生。
-    verified = _unlocked(request, share_id) or service.verify_claim(share_id, claim_token)
+    # 无码分享在 commit 之后也继续放行 —— 否则「下载一次就失效」。
+    peeked = service.peek(share_id, base_url(request))
+    verified = (
+        _unlocked(request, share_id)
+        or service.verify_claim(share_id, claim_token)
+        or (not peeked["has_extract_code"] and service.is_live(share_id))
+    )
     view, payload = service.open_share(
         share_id,
         code=code,

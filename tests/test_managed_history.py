@@ -193,7 +193,12 @@ def test_history_is_per_user(tmp_path):
         bob.close()
 
 
-def test_delete_history_burns_content_on_disk(tmp_path):
+def test_delete_history_burns_content_and_drops_the_row(tmp_path):
+    """管理模式下「删除」= 内容销毁 + 记录消失，不留墓碑。
+
+    墓碑是给「阅后即焚」用的：接收方需要看到「已焚毁」。
+    主动删除不需要，留着只会让历史列表越来越长。
+    """
     with client_for(tmp_path, **OAUTH_ON) as client:
         as_user(client)
         share = client.post(
@@ -201,24 +206,38 @@ def test_delete_history_burns_content_on_disk(tmp_path):
             json={"text": "sensitive body", "no_code": True},
         ).json()
 
-        burned = client.delete(f"/api/shares/{share['id']}")
-        assert burned.status_code == 200
-        assert burned.json()["state"] == "burned"
+        deleted = client.delete(f"/api/shares/{share['id']}")
+        assert deleted.status_code == 200
 
-        # 焚毁之后链接必须失效，而不只是从列表里消失
-        assert client.get(f"/api/shares/{share['id']}/content").status_code == 410
-        assert client.get("/api/shares/mine").json()["items"][0]["state"] == "burned"
+        # 记录从列表里消失
+        assert client.get("/api/shares/mine").json()["items"] == []
+        # 内容真的没了：链接和正文都取不到
+        assert client.get(f"/api/shares/{share['id']}").status_code == 404
+        assert client.get(f"/api/shares/{share['id']}/content").status_code == 404
 
 
-def test_clear_history_burns_everything_live(tmp_path):
+def test_clear_history_empties_the_list(tmp_path):
     with client_for(tmp_path, **OAUTH_ON) as client:
         as_user(client)
         for text in ("one", "two", "three"):
             client.post("/api/shares", json={"text": text, "no_code": True})
 
         assert client.delete("/api/shares/mine").json()["burned"] == 3
-        states = [item["state"] for item in client.get("/api/shares/mine").json()["items"]]
-        assert states == ["burned", "burned", "burned"]
+        # 清空的意义就是列表回到零，不是全变成「已焚毁」
+        assert client.get("/api/shares/mine").json()["items"] == []
+
+
+def test_clear_history_also_drops_previous_tombstones(tmp_path):
+    """已经焚毁（墓碑）的记录也要一起清掉，否则列表永远清不干净。"""
+    with client_for(tmp_path, **OAUTH_ON) as client:
+        as_user(client)
+        share = client.post("/api/shares", json={"text": "x", "no_code": True}).json()
+        # 让它变成墓碑：读满一次（默认 max_reads=1）会焚毁但不删行
+        client.get(f"/api/shares/{share['id']}/content?code=")
+        assert client.get("/api/shares/mine").json()["items"][0]["state"] == "burned"
+
+        client.delete("/api/shares/mine")
+        assert client.get("/api/shares/mine").json()["items"] == []
 
 
 # ---------------------------------------------------------------- Gitea OAuth

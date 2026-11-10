@@ -204,3 +204,78 @@ def test_pure_single_file_still_streams_raw(tmp_path):
         assert claim.headers["content-type"].startswith("application/octet-stream")
         assert claim.content == b"raw-bytes"
 
+
+def test_download_survives_commit_for_unlimited_shares(tmp_path):
+    """下载一个文件后再下另一个，不能因为「页面被判定消费过」就失败。
+
+    回归测试：commit 会清空 claim_token，而 /file 和 /download 原本要求
+    token 仍然有效，于是「下载一次就用不了」。不限次数分享（CI 默认）
+    在 commit 之后必须继续可读。
+    """
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/shares",
+            files=[
+                ("file", ("a.bin", b"AAA", "application/octet-stream")),
+                ("file", ("b.bin", b"BBB", "application/octet-stream")),
+            ],
+            data={"no_code": "1", "max_reads": "-1"},
+        ).json()
+        share_id = created["id"]
+
+        token = client.post(f"/api/shares/{share_id}/claim").headers["x-claim-token"]
+        assert client.get(f"/api/shares/{share_id}/file/0?claim_token={token}").status_code == 200
+
+        # 关页面 = commit，token 随即失效
+        client.post(f"/api/shares/{share_id}/commit?claim_token={token}")
+
+        # 同一个（已失效的）token 仍然能继续取 —— 分享本身还活着
+        assert client.get(f"/api/shares/{share_id}/file/0?claim_token={token}").status_code == 200
+        assert client.get(f"/api/shares/{share_id}/file/1?claim_token={token}").status_code == 200
+        assert client.get(f"/api/shares/{share_id}/download?claim_token={token}").status_code == 200
+
+
+def test_coded_share_still_requires_unlock_for_files(tmp_path):
+    """放行只针对无码分享；有提取码的仍然必须解锁。"""
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/shares",
+            files=[("file", ("c.bin", b"CCC", "application/octet-stream"))],
+            data={"extract_code": "1234"},
+        ).json()
+        share_id = created["id"]
+
+        assert client.get(f"/api/shares/{share_id}/file/0").status_code == 403
+        assert client.get(f"/api/shares/{share_id}/file/0?code=9999").status_code == 403
+        ok = client.get(f"/api/shares/{share_id}/file/0?code=1234")
+        assert ok.status_code == 200
+        assert ok.content == b"CCC"
+
+
+def test_duplicate_file_names_do_not_collide(tmp_path):
+    """两个同名文件：磁盘、单取、ZIP 都不能互相覆盖。"""
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/shares",
+            files=[
+                ("file", ("report.txt", b"FIRST", "text/plain")),
+                ("file", ("report.txt", b"SECOND", "text/plain")),
+            ],
+            data={"no_code": "1", "max_reads": "-1"},
+        ).json()
+        share_id = created["id"]
+        assert created["file_count"] == 2
+
+        token = client.post(f"/api/shares/{share_id}/claim").headers["x-claim-token"]
+        assert client.get(f"/api/shares/{share_id}/file/0?claim_token={token}").content == b"FIRST"
+        assert client.get(f"/api/shares/{share_id}/file/1?claim_token={token}").content == b"SECOND"
+
+        archive = client.get(f"/api/shares/{share_id}/download?claim_token={token}")
+        with zipfile.ZipFile(io.BytesIO(archive.content)) as zf:
+            names = zf.namelist()
+            # 同名会自动改名，两份内容都在
+            assert len(names) == 2
+            assert names[0] == "report.txt"
+            assert zf.read(names[0]) == b"FIRST"
+            assert zf.read(names[1]) == b"SECOND"
+

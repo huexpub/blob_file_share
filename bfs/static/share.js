@@ -276,9 +276,33 @@ async function renderBundle() {
     }
   }
 
+  // 重名文件标上序号，否则列表里两行一模一样、下载下来也叫同名
+  const seen = new Map();
+  const labels = files.map((item) => {
+    const base = item.file_name || `file-${item.idx + 1}`;
+    const key = base.toLowerCase();
+    const count = (seen.get(key) || 0) + 1;
+    seen.set(key, count);
+    if (count === 1) return { base, label: base, dup: false };
+    // 第二次出现才改：先回头补第一个，再给后来的编号
+    return { base, label: withSuffix(base, count), dup: true };
+  });
+  // 有重复时，把「第一份」也标成 -1，避免出现「report.txt / report-2.txt」这种不对称
+  const hasDup = labels.some((item) => item.dup);
+  if (hasDup) {
+    const seen2 = new Map();
+    labels.forEach((item) => {
+      const key = item.base.toLowerCase();
+      const n = (seen2.get(key) || 0) + 1;
+      seen2.set(key, n);
+      item.label = withSuffix(item.base, n);
+    });
+  }
+
   const rows = files
     .map((item, index) => {
       const name = item.file_name;
+      const label = labels[index].label;
       const canPreview =
         isImage(name, item.content_type) ||
         isPdf(name, item.content_type) ||
@@ -288,7 +312,9 @@ async function renderBundle() {
         <span class="bundle-icon">${icon(
           isImage(name, item.content_type) ? 'image' : 'file'
         )}</span>
-        <span class="bundle-name truncate">${escapeHtml(name)}</span>
+        <span class="bundle-name truncate" title="${escapeHtml(label)}">${escapeHtml(
+          label
+        )}</span>
         <span class="bundle-size muted-2">${formatBytes(item.size)}</span>
         <span class="bundle-ops">
           ${
@@ -357,10 +383,19 @@ async function downloadBundleFile(idx) {
   try {
     const item = (content.files || [])[idx];
     const blob = await fetchBundleFile(idx);
-    downloadSpec(blob, item ? item.file_name : `file-${idx + 1}`);
+    const name = document.querySelector(`.bundle-item:nth-child(${idx + 1}) .bundle-name`);
+    // 用列表上显示的那个名字（重名时已带 -1/-2），下载下来才不会互相覆盖
+    downloadSpec(blob, name ? name.textContent.trim() : item ? item.file_name : `file-${idx + 1}`);
   } catch (error) {
     toast(error.message || '下载失败', 'err');
   }
+}
+
+/** `report.txt` + 2 -> `report-2.txt`（保留扩展名，便于系统识别类型） */
+function withSuffix(name, n) {
+  const dot = name.lastIndexOf('.');
+  if (dot <= 0) return `${name}-${n}`;
+  return `${name.slice(0, dot)}-${n}${name.slice(dot)}`;
 }
 
 async function previewBundleFile(idx) {
@@ -615,9 +650,30 @@ function commitOnce() {
 }
 
 window.addEventListener('pagehide', commitOnce);
+
+/*
+ * 「切到后台」不等于「关闭页面」。
+ *
+ * 点击下载时浏览器会弹出保存对话框，窗口同样进入 hidden；更别说
+ * 用户在另一个标签页里待一会儿。原来的实现一 hidden 就 commit，
+ * 于是「下载一个文件 → 再点另一个」就变成「已经消费过了」。
+ *
+ * 现在只在真正离开时提交：
+ *   * pagehide（关标签、导航离开、移动端切走）—— 唯一可靠的信号；
+ *   * 以及超过 30 秒仍处于 hidden 的「疑似关闭」兜底，
+ *     避免移动端 pagehide 不触发时永远不消费。
+ */
+let hiddenTimer = 0;
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') commitOnce();
+  if (document.visibilityState === 'hidden') {
+    hiddenTimer = window.setTimeout(commitOnce, 30_000);
+  } else {
+    // 回来了：撤销待提交的兜底，这只是切了个窗口
+    window.clearTimeout(hiddenTimer);
+    hiddenTimer = 0;
+  }
 });
+window.addEventListener('beforeunload', () => window.clearTimeout(hiddenTimer));
 window.addEventListener('pageshow', (event) => {
   if (event.persisted && committed) showDead('burned');
 });
