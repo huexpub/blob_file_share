@@ -168,3 +168,39 @@ def test_single_file_keeps_old_behaviour(tmp_path):
         download = client.get(f"/api/shares/{created['id']}/download")
         assert download.status_code == 200
         assert download.content == b"payload"
+
+
+def test_text_plus_one_file_keeps_the_text(tmp_path):
+    """文本 + 单个文件：不能因为「只有一个文件」就把文本吞掉。
+
+    回归测试。之前 _extract_payload 只要 len(files)==1 就直接返回文件，
+    于是分享页只显示文件内容，粘的那段文本消失了。
+    """
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/shares",
+            files=[("file", ("data.txt", b"file-body", "text/plain"))],
+            data={"text": "the pasted text", "no_code": "1", "max_reads": "-1"},
+        ).json()
+        assert created["file_count"] == 1
+
+        claim = client.post(f"/api/shares/{created['id']}/claim")
+        manifest = claim.json()
+        # 走清单而不是裸文件，文本才带得出来
+        assert manifest["manifest"] is True
+        assert manifest["text"] == "the pasted text"
+        assert [f["file_name"] for f in manifest["files"]] == ["data.txt"]
+
+
+def test_pure_single_file_still_streams_raw(tmp_path):
+    """纯单文件仍然直接流回文件本身（脚本、OTA 依赖这个行为）。"""
+    with make_client(tmp_path) as client:
+        created = client.post(
+            "/api/shares",
+            files=[("file", ("only.bin", b"raw-bytes", "application/octet-stream"))],
+            data={"no_code": "1", "max_reads": "-1"},
+        ).json()
+        claim = client.post(f"/api/shares/{created['id']}/claim")
+        assert claim.headers["content-type"].startswith("application/octet-stream")
+        assert claim.content == b"raw-bytes"
+

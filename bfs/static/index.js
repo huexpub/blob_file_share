@@ -819,8 +819,7 @@ function shareMessage(share) {
   // 一次性链接要提前说，否则对方随手关掉就再也打不开了
   if (share.max_reads === 1) lines.push('阅后即焚，打开看完就没了。');
   else if (share.max_reads > 1) lines.push(`可打开 ${share.max_reads} 次。`);
-  return lines.join('
-');
+  return lines.join('\n');
 }
 
 /* ---------------------------------------------------------------- 生成后的轻提示 */

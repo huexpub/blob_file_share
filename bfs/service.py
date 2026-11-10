@@ -657,16 +657,17 @@ class Service:
     def _extract_payload(self, row, conn=None) -> str | FilePayload | None:
         """把正文取出来（文件走传送带），供响应使用。
 
-        单文件分享返回那个文件；多文件分享返回 ``None`` —— 调用方应当
-        走 ``stage_file()`` 逐个取，或者走打包下载。
+        只有「纯文件、且只有一个文件」才直接返回那个文件。
+        其它情况（多文件、或有文本）都返回 ``None``，调用方应当返回清单，
+        否则文本会在「文本 + 1 个文件」时被悄悄丢掉。
         """
         if row["kind"] == "file":
-            files = self._file_rows(conn, row["id"]) if conn is not None else self._file_rows(None, row["id"])
+            files = self._file_rows(conn, row["id"])
             if not files:
                 raise ShareError("gone", "内容已被焚毁", 410)
-            if len(files) > 1:
-                return None
-            return self._file_payload(files[0])
+            if len(files) == 1 and not row["text_content"]:
+                return self._file_payload(files[0])
+            return None
         return row["text_content"]
 
     def _file_rows(self, conn, share_id: str):
@@ -749,10 +750,12 @@ class Service:
                 files = self._file_rows(conn, share_id)
                 if not files:
                     raise ShareError("gone", "内容已被焚毁", 410)
-                # 多文件分享没有「单个 payload」：调用方据 view 里的 files 列表
-                # 逐个取。单文件保持原来的流式行为，兼容脚本与 OTA。
+                # 只有「一个文件且没有文本」才直接流回该文件（兼容脚本/OTA）。
+                # 带文本时也返回 None：否则正文会被悄悄丢掉。
                 payload: str | FilePayload | None = (
-                    self._file_payload(files[0]) if len(files) == 1 else None
+                    self._file_payload(files[0])
+                    if len(files) == 1 and not row["text_content"]
+                    else None
                 )
             else:
                 payload = row["text_content"]
