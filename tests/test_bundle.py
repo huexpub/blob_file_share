@@ -111,6 +111,36 @@ def test_multi_file_requires_code_without_ticket(tmp_path):
         assert ok.content == b"first"
 
 
+def test_purge_preserves_multi_file_blobs(tmp_path):
+    """Orphan cleanup must recognize blobs stored in share_files."""
+    settings = Settings(data_dir=tmp_path / "data", rate_limit_per_minute=1000, audit=False)
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/api/shares",
+            files=[
+                ("file", ("one.txt", b"first", "text/plain")),
+                ("file", ("two.txt", b"second", "text/plain")),
+            ],
+            data={"no_code": "1", "max_reads": "-1"},
+        ).json()
+
+        folder = settings.blob_dir / created["id"][:2]
+        blobs_before = sorted(path.name for path in folder.iterdir())
+        assert len(blobs_before) == 2
+
+        from bfs.service import Service
+
+        assert Service(settings).purge()["burned"] == 0
+        assert sorted(path.name for path in folder.iterdir()) == blobs_before
+
+        claim = client.post(f"/api/shares/{created['id']}/claim")
+        token = claim.headers["x-claim-token"]
+        first = client.get(f"/api/shares/{created['id']}/file/0?claim_token={token}")
+        second = client.get(f"/api/shares/{created['id']}/file/1?claim_token={token}")
+        assert first.content == b"first"
+        assert second.content == b"second"
+
+
 def test_multi_file_download_is_a_zip(tmp_path):
     with make_client(tmp_path) as client:
         created = client.post(

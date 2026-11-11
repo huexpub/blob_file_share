@@ -1036,6 +1036,10 @@ class Service:
                 row["blob"]
                 for row in conn.execute("SELECT blob FROM shares WHERE blob IS NOT NULL")
             }
+            known.update(
+                row["blob"]
+                for row in conn.execute("SELECT blob FROM share_files WHERE blob IS NOT NULL")
+            )
         if not self.settings.blob_dir.exists():
             return 0
         count = 0
